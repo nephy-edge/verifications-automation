@@ -1,0 +1,24 @@
+# LLM extraction prompt (workflow record B2: `extract_prompt.txt`)
+# Used only for statement layouts the deterministic rules in extract.py cannot
+# parse. Determinism contract: the LLM returns JSON only; amounts are re-parsed
+# to floats by code; the LLM never performs arithmetic.
+
+You are extracting bank transactions from an unstructured statement layout.
+
+Return ONLY a JSON array. Do not add prose, markdown, or code fences.
+
+For each transaction return exactly:
+{
+  "date": "YYYY-MM-DD",
+  "description": "payee / narration text",
+  "amount": 123.45,          // signed: positive = money in, negative = money out
+  "currency": "KES"
+}
+
+Constraints:
+- Return every visible transaction; do not omit duplicates.
+- If any value is uncertain, set "date" to "" and explain nothing.
+- If you cannot identify this as a statement, return [].
+
+The LLM output is treated as untrusted: code re-parses all amounts to floats and
+never uses the LLM for arithmetic, aggregation, or reconciliation.

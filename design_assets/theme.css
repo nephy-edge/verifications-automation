@@ -1,0 +1,225 @@
+*,*::before,*::after{box-sizing:border-box;}
+::selection{background:#C7E2D9;}
+
+/* ── Base typography & background ── */
+html, body, .stApp, section.main{background:#F2F6F4 !important;color:#16312E !important;font-family:"Inter",system-ui,Arial,sans-serif !important;font-size:13.5px !important;line-height:1.6 !important;-webkit-font-smoothing:antialiased !important;}
+section.main .block-container{padding-top:2rem !important;padding-bottom:4rem !important;}
+
+/* ── Hide default Streamlit header and footer ── */
+[data-testid="stHeader"]{display:none !important;}
+footer{visibility:hidden !important;}
+
+/* ── Masthead ── */
+.masthead{
+    background:#155B54;color:#EDF3F1;
+    padding:13px 30px;margin:-2rem -2rem 0 -4rem;
+    display:flex;align-items:center;gap:16px;
+    border-bottom:3px solid #36C186;
+    position:sticky;top:0;z-index:100;
+}
+.masthead .brand{display:flex;align-items:center;gap:9px;}
+.masthead .brand .dot{width:11px;height:11px;border-radius:50%;background:#36C186;box-shadow:0 0 0 3px rgba(54,193,134,.28);}
+.masthead .brand .name{font-family:"Inter",sans-serif;font-weight:600;font-size:1.12rem;color:#fff;}
+.masthead .divider{width:1px;height:26px;background:#3A6A64;}
+.masthead .doctype{font-size:.62rem;text-transform:uppercase;letter-spacing:.16em;color:#A9C2BD;}
+.masthead .spacer{flex:1;}
+.masthead .mhead-meta{display:flex;align-items:center;gap:12px;}
+.masthead .mhead-meta .mdate{font-size:.74rem;color:#C9D9D5;font-weight:500;}
+
+/* ── Cover / document title ── */
+.cover{
+    padding:30px 30px 4px 30px;margin:0 -2rem 1rem -4rem;
+}
+.cover h1.cover-title{
+    font-family:"Inter",sans-serif !important;font-size:1.75rem !important;font-weight:700 !important;
+    color:#1B312E !important;letter-spacing:-0.01em !important;
+    background:transparent !important;border:none !important;padding:0 !important;
+    margin:0 0 8px 0 !important;line-height:1.15 !important;
+}
+.cover .cover-sub{font-size:.9rem;color:#525252;max-width:780px;}
+
+/* ── Tabs ── */
+div[data-testid="stTabs"] [data-baseweb="tab-list"]{
+    gap:0;border-bottom:2px solid #D8DEE5;background:transparent;
+}
+div[data-testid="stTabs"] [data-baseweb="tab-list"] button{
+    font-family:"Inter",sans-serif !important;font-weight:600 !important;font-size:0.82rem !important;
+    color:#666666 !important;border-radius:7px 7px 0 0;padding:9px 22px !important;
+    background:transparent !important;border:none !important;
+}
+div[data-testid="stTabs"] [data-baseweb="tab-list"] button[aria-selected="true"]{
+    color:#0E4A43 !important;border-bottom:2px solid #155B54 !important;background:transparent !important;
+}
+div[data-testid="stTabs"] [data-baseweb="tab-list"] button:hover{color:#0E4A43 !important;}
+
+/* ── Headers ── */
+h1,h2,h3,h4,h5,h6{font-family:"Inter",sans-serif !important;color:#16312E !important;font-weight:600 !important;}
+h1{font-size:1.72rem !important;letter-spacing:-0.005em !important;}
+h2{font-size:1.18rem !important;padding:9px 14px !important;background:#EDF3F1 !important;border-left:3px solid #155B54 !important;margin-bottom:14px !important;margin-top:30px !important;scroll-margin-top:130px !important;}
+h3{font-size:.92rem !important;font-weight:700 !important;margin:18px 0 7px !important;}
+
+/* ── Cards / Metrics ── */
+div[data-testid="stMetric"]{
+    background:#ffffff !important;border:1px solid #D8DEE5 !important;border-radius:7px !important;
+    padding:18px 22px !important;box-shadow:none !important;
+}
+div[data-testid="stMetric"] label{
+    font-size:.58rem !important;text-transform:uppercase !important;letter-spacing:.11em !important;
+    color:#666666 !important;font-family:"Inter",sans-serif !important;font-weight:600 !important;
+}
+div[data-testid="stMetric"] div[data-testid="stMetricValue"]{
+    color:#16312E !important;font-size:1.6rem !important;
+    font-family:"Inter",sans-serif !important;font-weight:600 !important;
+}
+
+/* ── Buttons ── */
+.stButton > button, button[kind="primary"], button[data-baseweb="button"], button[data-testid="stBaseButton-formSubmit"], button[data-testid="baseButton-primary"]{
+    background:#155B54 !important;color:#ffffff !important;
+    border:none !important;border-radius:7px !important;
+    font-family:"Inter",sans-serif !important;font-weight:600 !important;font-size:.82rem !important;
+    padding:9px 26px !important;
+}
+.stButton > button *, button[kind="primary"] *, button[data-baseweb="button"] *, button[data-testid="stBaseButton-formSubmit"] *, button[data-testid="baseButton-primary"] *{
+    color:#ffffff !important;
+}
+.stButton > button:hover, button[kind="primary"]:hover, button[data-baseweb="button"]:hover{
+    background:#0E4A43 !important;color:#ffffff !important;
+}
+.stDownloadButton > button{
+    background:#155B54 !important;color:#ffffff !important;
+    border:none !important;border-radius:7px !important;
+    font-family:"Inter",sans-serif !important;font-weight:600 !important;font-size:.82rem !important;
+    padding:9px 26px !important;
+}
+.stDownloadButton > button *{color:#ffffff !important;}
+.stDownloadButton > button:hover{background:#0E4A43 !important;color:#ffffff !important;}
+
+/* ── Inputs ── */
+div[data-baseweb="select"] > div, .stSelectbox div[data-baseweb="select"] > div{
+    border-color:#D8DEE5 !important;border-radius:7px !important;background:#ffffff !important;
+}
+div[data-baseweb="select"] > div:focus-within, .stSelectbox div[data-baseweb="select"] > div:focus-within{
+    border-color:#155B54 !important;box-shadow:0 0 0 2px rgba(21,91,84,.12) !important;
+}
+.stTextInput input, input[data-baseweb="input"]{
+    border-color:#D8DEE5 !important;border-radius:7px !important;
+    background:#ffffff !important;font-family:"Inter",sans-serif !important;
+}
+.stTextInput input:focus, input[data-baseweb="input"]:focus{
+    border-color:#155B54 !important;box-shadow:0 0 0 2px rgba(21,91,84,.12) !important;
+}
+
+/* ── Radio ── */
+.stRadio > div[role="radiogroup"], div[data-testid="stRadio"] > div:first-child{
+    background:#ffffff !important;border:1px solid #D8DEE5 !important;border-radius:7px !important;
+    padding:14px 18px !important;
+}
+.stRadio label, div[data-testid="stRadio"] label{
+    font-family:"Inter",sans-serif !important;color:#525252 !important;font-weight:500 !important;
+}
+
+/* ── File uploader ── */
+.stFileUploader > section, section[data-testid="stFileUploader"]{
+    border:1px dashed #D3DDD9 !important;border-radius:7px !important;background:#F2F6F4 !important;
+}
+.stFileUploader section p, section[data-testid="stFileUploader"] p{color:#666666 !important;}
+
+/* ── DataFrames ── */
+.stDataFrame, div[data-testid="stTable"]{
+    border:1px solid #D8DEE5 !important;border-radius:7px !important;overflow:hidden !important;
+}
+.stDataFrame thead th, div[data-testid="stTable"] thead th, .stDataFrame th, div[data-testid="stTable"] th{
+    background:#155B54 !important;color:#ffffff !important;
+    font-size:.62rem !important;text-transform:uppercase !important;letter-spacing:.06em !important;
+    font-weight:600 !important;font-family:"Inter",sans-serif !important;
+    padding:9px 10px !important;border-bottom:1px solid #155B54 !important;
+}
+.stDataFrame tbody td, div[data-testid="stTable"] tbody td, .stDataFrame td, div[data-testid="stTable"] td{
+    font-family:"Inter",sans-serif !important;font-size:.8rem !important;
+    color:#525252 !important;padding:8px 10px !important;border-bottom:1px solid #D8DEE5 !important;
+}
+.stDataFrame tbody tr:hover td, div[data-testid="stTable"] tbody tr:hover td{
+    background:#F2F6F4 !important;
+}
+/* Zebra striping per Lendable table style (alt #F3F3F3) */
+.stDataFrame tbody tr:nth-child(even) td, div[data-testid="stTable"] tbody tr:nth-child(even) td{
+    background:#F3F3F3 !important;
+}
+
+/* ── Progress bar ── */
+.stProgress > div > div{background:#D8DEE5 !important;border-radius:10px !important;}
+.stProgress > div > div > div{background:#155B54 !important;}
+
+/* ── Alerts ── */
+div[data-testid="stSuccess"]{
+    border-left:3px solid #155B54 !important;background:#E3EFEC !important;
+    border-radius:0 7px 7px 0 !important;
+}
+div[data-testid="stError"]{
+    border-left:3px solid #CB4B3A !important;background:#FBE9E4 !important;
+    border-radius:0 7px 7px 0 !important;
+}
+div[data-testid="stWarning"]{
+    border-left:3px solid #CB4B3A !important;background:#FBE9E4 !important;
+    border-radius:0 7px 7px 0 !important;
+}
+div[data-testid="stInfo"]{
+    border-left:3px solid #155B54 !important;background:#E8EFED !important;
+    border-radius:0 7px 7px 0 !important;
+}
+
+/* ── Expander ── */
+.stExpander > details, details[data-testid="stExpander"]{
+    border:1px solid #D8DEE5 !important;border-radius:7px !important;
+}
+.stExpander > details > summary, details[data-testid="stExpander"] > summary{
+    font-family:"Inter",sans-serif !important;color:#525252 !important;font-weight:600 !important;
+}
+
+/* ── Checkbox ── */
+.stCheckbox label, div[data-testid="stCheckbox"] label{
+    font-family:"Inter",sans-serif !important;color:#525252 !important;
+}
+.stCheckbox label span, div[data-testid="stCheckbox"] label span{font-weight:500 !important;}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"]{background:#16312E !important;}
+[data-testid="stSidebar"] *{color:#EDF3F1 !important;}
+[data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3{color:#ffffff !important;}
+
+/* ── Captions / muted text ── */
+.stCaption, .caption, small{color:#666666 !important;font-family:"Inter",sans-serif !important;}
+p, div[data-testid="stMarkdownContainer"] p{color:#525252 !important;}
+
+/* ── Force white button text (overrides label markdown color) ── */
+.stButton button div[data-testid="stMarkdownContainer"] p,
+.stButton button p,
+.stButton button span,
+.stDownloadButton button div[data-testid="stMarkdownContainer"] p,
+.stDownloadButton button p,
+.stDownloadButton button span,
+[data-testid^="stBaseButton"] div[data-testid="stMarkdownContainer"] p,
+[data-testid^="stBaseButton"] p,
+[data-testid^="stBaseButton"] span,
+[data-testid^="baseButton"] div[data-testid="stMarkdownContainer"] p,
+[data-testid^="baseButton"] p,
+[data-testid^="baseButton"] span,
+button[data-testid^="stBaseButton"],
+button[data-testid^="baseButton"]{
+    color:#ffffff !important;
+}
+
+/* ── Spacing ── */
+div[data-testid="stVerticalBlock"]{gap:0.5rem !important;}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar{width:8px;}
+::-webkit-scrollbar-track{background:#F2F6F4;}
+::-webkit-scrollbar-thumb{background:#D3DDD9;border-radius:4px;}
+::-webkit-scrollbar-thumb:hover{background:#98A8A4;}
+
+/* ── Responsive ── */
+@media (max-width:768px){
+    .masthead,.cover{margin-left:-1rem;margin-right:-1rem;padding-left:16px;padding-right:16px;}
+    .cover{padding-top:20px;}
+}

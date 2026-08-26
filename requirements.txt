@@ -1,0 +1,24 @@
+# Deterministic engine — runtime + parsing. Kept minimal, deterministic-first.
+PyYAML>=6.0
+
+# PDF parsing / extraction (Phase 1)
+pypdf>=4.0
+pdfplumber>=0.11.0
+
+# OCR fallback for scanned/image-only statements (phase1/ocr.py). Also
+# requires the `tesseract` binary itself on the machine (not pip-installable);
+# see .env.example's TESSERACT_CMD. Degrades to the existing placeholder when
+# either is missing — never a hard dependency for the rest of the pipeline.
+pytesseract>=0.3.10
+pypdfium2>=4.0
+pillow>=10.0
+
+# Data handling (loan tape, ledger, cash map spreadsheets)
+pandas>=2.0
+openpyxl>=3.1.0   # pandas' .xlsx engine — without it every Excel upload fails
+
+# Diagnostics/optional shared artifacts
+python-dotenv>=1.0.0
+
+# Review dashboard (app/streamlit_app.py)
+streamlit>=1.38.0

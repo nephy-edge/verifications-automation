@@ -1,0 +1,16 @@
+<!-- Masthead component
+     Rendered in app/streamlit_app.py via st.html(f"""...""")
+     Replace {ACTIVE_TAB} with the current tab label and {LIVE_DATE}
+     with datetime.now().strftime('%d %b %Y'). -->
+<div class="masthead">
+    <div class="brand">
+        <span class="dot"></span>
+        <span class="name">Lendable</span>
+    </div>
+    <span class="divider"></span>
+    <span class="doctype">{ACTIVE_TAB}</span>
+    <span class="spacer"></span>
+    <div class="mhead-meta">
+        <span class="mdate">{LIVE_DATE}</span>
+    </div>
+</div>

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Secrets / environment
+.env
+*.service-account.json
+
+# Runtime artifacts
+verifications.log.jsonl
+out/
+*.tmp
+*.log
+
+# Real financial samples — not for a shared/public repo. Tests that need these
+# (test_extract.py's real-Absa-sample case, etc.) skip gracefully when absent.
+samples/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests / pytest cache
+.pytest_cache/

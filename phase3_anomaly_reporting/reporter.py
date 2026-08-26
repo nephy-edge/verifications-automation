@@ -1,0 +1,103 @@
+"""Working papers + exception report generation (A3 step 6, B2/reporter.py).
+
+Template-driven, deterministic. Produces a machine-readable JSON report and a
+plain-text summary (Markdown-style) that a human can review. Supporting evidence
+(stable record keys) is attached to each exception.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Sequence
+
+from phase0_foundations.models import ExceptionItem, VerificationRun
+
+
+def _markdown(run: VerificationRun) -> str:
+    lines: list[str] = []
+    lines.append(f"# Verification report - run {run.id}")
+    lines.append("")
+    lines.append("## Independent aggregates (deterministic)")
+    lines.append("")
+    for k, v in run.aggregates.items():
+        if isinstance(v, float):
+            lines.append(f"- {k}: {v:,.2f}")
+        else:
+            lines.append(f"- {k}: {v}")
+    lines.append("")
+
+    inputs = run.inputs or {}
+    population = inputs.get("population_size")
+    ingested = inputs.get("rows_ingested")
+    pct = inputs.get("coverage_pct")
+    asset_coverage = inputs.get("asset_coverage")
+    if (population is not None and ingested is not None and pct is not None) or asset_coverage:
+        lines.append("## Coverage")
+        lines.append("")
+        if population is not None and ingested is not None and pct is not None:
+            lines.append(f"- {ingested} of {population} transactions tested ({pct:.1f}%)")
+        if asset_coverage:
+            lines.append(
+                f"- {asset_coverage['rows_ingested']} of {asset_coverage['population_size']} "
+                f"reported assets checked against the registry ({asset_coverage['coverage_pct']:.1f}%)"
+            )
+        lines.append("")
+
+    lines.append(f"## Exceptions ({len(run.exceptions)})")
+    lines.append("")
+    if not run.exceptions:
+        lines.append("No exceptions flagged.")
+    for e in run.exceptions:
+        line = f"- [{e.kind}] {e.description} -> status={e.status}"
+        if e.evidence:
+            line += f" (evidence: {', '.join(e.evidence)})"
+        lines.append(line)
+    lines.append("")
+    lines.append("## Human review")
+    lines.append("")
+    pending = [e for e in run.exceptions if e.status == "pending"]
+    lines.append(f"{len(pending)} exception(s) awaiting review and sign-off.")
+    return "\n".join(lines)
+
+
+def build_report(
+    run: VerificationRun,
+    out_dir: str | Path,
+    exceptions: Sequence[ExceptionItem] | None = None,
+) -> Path:
+    """Write the JSON + Markdown report for a run. Returns path to the JSON report."""
+    run.exceptions = list(exceptions) if exceptions is not None else run.exceptions
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    report = {
+        "run_id": run.id,
+        "status": run.status,
+        "inputs": run.inputs,
+        "aggregates": run.aggregates,
+        "coverage": {
+            "rows_ingested": run.inputs.get("rows_ingested"),
+            "population_size": run.inputs.get("population_size"),
+            "coverage_pct": run.inputs.get("coverage_pct"),
+            "assets": run.inputs.get("asset_coverage"),
+        },
+        "exceptions": [
+            {
+                "id": e.id,
+                "kind": e.kind,
+                "severity": e.severity,
+                "description": e.description,
+                "evidence": e.evidence,
+                "status": e.status,
+            }
+            for e in run.exceptions
+        ],
+    }
+
+    json_path = out / f"run_{run.id}.json"
+    json_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+
+    md_path = out / f"run_{run.id}.md"
+    md_path.write_text(_markdown(run), encoding="utf-8")
+    return json_path

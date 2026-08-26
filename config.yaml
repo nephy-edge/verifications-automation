@@ -1,0 +1,25 @@
+# Deterministic thresholds — single source of truth (workflow record B3/A5).
+# Never recompute, alter, or soften these in LLM steps. Version-controlled via git.
+
+thresholds:
+  collections_variance: 0.02        # >2% -> flag for review
+  disbursement_abs: 100             # > $100 absolute -> investigate
+  disbursement_pct: 0.05            # or >5% -> investigate
+  cash_balance_variance: 0.01       # >1% -> escalate to manual verification
+  anomaly_score_high: 0.75          # >=0.75 -> forensic review route
+  pdf_confidence_floor: 0.85        # <85% -> manual spot-check
+  transaction_volume_multiple: 10   # frequency anomaly (10x normal)
+  round_dollar_materiality_multiple: 3   # round amount must also be >3x median to flag
+
+llm:
+  parse_temperature: 0.3
+  anomaly_temperature: 0.5
+  max_tokens: 4000
+  provider: ""                      # e.g. "openai" | "anthropic" (leave empty for rules-only)
+  model: ""
+
+logging:
+  path: verifications.log.jsonl
+
+output:
+  dir: out
