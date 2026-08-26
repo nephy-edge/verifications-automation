@@ -70,22 +70,32 @@ exceptions from the browser — every action lands in the same
 `verifications.log.jsonl` the CLI writes to. Design reuses the workspace's
 `streamlit_design` skill tokens for visual parity with `Bank Access`.
 
-Six tabs total. Three are standalone, on-demand tools — separate from the
+Five tabs total. Two are standalone, on-demand tools — separate from the
 Run/Review/Audit pipeline by design, each with its own uploaders and its own
 result, not merged into `run.exceptions`:
-- **Asset existence verification** — `phase2_verification_engine/assets.py`,
-  a reported-register-vs-registry-check comparison.
-- **Vehicle verification** — `phase1_ingestion_parsing/vehicle_verify.py`, a
-  registry-API lookup (7 countries) as a CAPTCHA-free alternative to
-  `vehicle_plate_peru/checker.py`'s browser scraper. Mock-backed until a real
-  `VERIFIK_TOKEN` + confirmed API contract are supplied.
+- **Asset & vehicle verification** — `phase2_verification_engine/assets.py` +
+  `phase1_ingestion_parsing/vehicle_verify.py`. Two modes sharing one country
+  selector and one registry client:
+  - *Verify a reported asset register* (bulk, owner-focused): compares a
+    collateral register against a registry check per plate, and raises
+    `ExceptionItem`s into the Review/Audit sign-off queue. The registry side
+    defaults to a **live lookup** via `vehicle_verify.make_client()` (mocked
+    until `VERIFIK_TOKEN` is set) — the same lookup that used to require a
+    manually pre-run, separately uploaded registry-check file; that upload
+    path is kept as a fallback for a check already run elsewhere.
+  - *Quick lookup / spot check*: an ad hoc, register-free plate lookup (single
+    or bulk-via-Excel), with an optional expected-vehicle column classified
+    Match/Partial/Mismatch — a CAPTCHA-free alternative to
+    `vehicle_plate_peru/checker.py`'s browser scraper, for the case where you
+    just want to check a few plates, not run a formal audit.
 - **Transaction matching** — `phase2_verification_engine/transaction_match.py`,
   a matched/unmatched comparison between a reported source and an
   independent one, complementing (not replacing) the deterministic
   aggregate reconciliation in the Run tab.
 
 See PROGRESS.md's 2026-08-25 entries for why these are separate tabs rather
-than folded into the Run tab's upload flow.
+than folded into the Run tab's upload flow, and the 2026-08-26 entry for why
+asset existence and vehicle verification were later merged into one tab.
 
 Scanned/image-only PDF statements fall back to OCR
 (`phase1_ingestion_parsing/ocr.py`) when the `tesseract` binary is installed

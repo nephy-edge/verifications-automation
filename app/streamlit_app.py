@@ -520,11 +520,10 @@ with st.sidebar:
     st.text(f"Anomaly forensic route >= {th.anomaly_score_high:.2f}")
     st.text(f"PDF confidence floor   < {th.pdf_confidence_floor:.0%}")
 
-tab_run, tab_assets, tab_vehicles, tab_review, tab_audit, tab_match = st.tabs(
+tab_run, tab_assets, tab_review, tab_audit, tab_match = st.tabs(
     [
         "Run verification",
-        "Asset existence verification",
-        "Vehicle verification",
+        "Asset & vehicle verification",
         "Review & sign-off",
         "Audit log & hardening",
         "Transaction matching",
@@ -867,258 +866,315 @@ with tab_run:
         else:
             st.info("No exceptions flagged.")
 
-# ----------------------------------------------- Asset existence verification
+# ------------------------------------------- Asset & vehicle verification
 with tab_assets:
-    st.subheader("Asset existence verification (standalone)")
+    st.subheader("Asset & vehicle verification")
     st.caption(
         "Independent of the Run tab — a separate reported-vs-independent comparison, not "
         "combined into the tape/bank/mobile reconciliation. Reported side: a collateral "
         "register naming pledged assets (plate/registration, borrower, expected owner). "
-        "Independent side: a third-party registry's own check run separately (e.g. "
-        "`vehicle_plate_peru`'s plate lookup, saved to Excel)."
+        "Independent side: a registry check on each plate — by default looked up live "
+        "against a registry API (Verifik; mock data until `VERIFIK_TOKEN` is set), or "
+        "supplied as an already-run registry-check file if you have one on hand."
     )
-    ac1, ac2 = st.columns(2)
-    with ac1:
-        asset_files = st.file_uploader(
-            "Reported assets register (plate / borrower / expected owner)",
-            type=["csv", "xlsx", "xls"],
-            accept_multiple_files=True,
-            key="assets_up",
-        )
-    with ac2:
-        asset_check_files = st.file_uploader(
-            "Registry check results (independent evidence)",
-            type=["csv", "xlsx", "xls"],
-            accept_multiple_files=True,
-            key="asset_checks_up",
-        )
 
-    if st.button("Run asset verification", disabled=not asset_files, type="primary"):
-        asset_dir = OUT_ROOT / "_asset_uploads"
-        asset_paths = [_save_upload(f, asset_dir) for f in asset_files]
-        asset_check_paths = [_save_upload(f, asset_dir) for f in (asset_check_files or [])]
-        expected_assets = load_expected_assets(asset_paths)
-        registry_results = load_registry_results(asset_check_paths)
-        asset_exceptions = verify_asset_existence(expected_assets, registry_results)
-        st.session_state["asset_result"] = {
-            "summaries": [
-                {
-                    "plate": a["plate"],
-                    "borrower": a.get("borrower", ""),
-                    "expected_owner": a.get("expected_owner", ""),
-                    "status": registry_results.get(a["plate"], {}).get("status", "(not checked)"),
-                    "registered_owner": registry_results.get(a["plate"], {}).get("propietario", ""),
-                    "verified_date": registry_results.get(a["plate"], {}).get("verified_date", ""),
-                }
-                for a in expected_assets
-            ],
-            "exceptions": asset_exceptions,
-            "coverage": (
-                coverage_stats(sum(1 for a in expected_assets if a["plate"] in registry_results), len(expected_assets))
-                if expected_assets
-                else None
-            ),
+    country_code = st.selectbox(
+        "Country (for registry lookups)",
+        options=list(COUNTRY_CONFIG),
+        format_func=lambda c: f"{COUNTRY_CONFIG[c].name} ({c})",
+        key="asset_country",
+    )
+    asset_cfg = COUNTRY_CONFIG[country_code]
+    asset_extra_inputs: dict[str, str] = {}
+    if asset_cfg.extra_inputs:
+        st.caption(f"{asset_cfg.name} needs extra details before lookup (applied to every plate below):")
+        asset_extra_inputs = {
+            k: st.text_input(k.replace("_", " ").title(), key=f"asset_extra_{k}")
+            for k in asset_cfg.extra_inputs
         }
 
-    asset_result = st.session_state.get("asset_result")
-    if asset_result:
-        summaries = asset_result["summaries"]
-        cov = asset_result["coverage"] or {}
-        st.caption(
-            f"{cov.get('rows_ingested', 0)} of {len(summaries)} reported asset(s) checked against "
-            f"the registry ({cov.get('coverage_pct', 0):.1f}%)."
-        )
-        st.dataframe(
-            pd.DataFrame(summaries).rename(
-                columns={
-                    "plate": "Plate",
-                    "borrower": "Borrower",
-                    "expected_owner": "Expected owner",
-                    "status": "Registry status",
-                    "registered_owner": "Registered owner",
-                    "verified_date": "Verified date",
-                }
-            ),
-            width="stretch",
-            hide_index=True,
+    verify_mode = st.radio(
+        "What do you want to do?",
+        [
+            "Verify a reported asset register (bulk, owner check)",
+            "Quick lookup / spot check (no register needed)",
+        ],
+        key="asset_mode",
+    )
+
+    if verify_mode.startswith("Verify a reported"):
+        registry_source = st.radio(
+            "Registry data source",
+            ["Live lookup (recommended)", "Upload a pre-run registry-check file"],
+            horizontal=True,
+            key="asset_registry_source",
         )
 
-        if asset_result["exceptions"]:
-            st.subheader(f"Exceptions ({len(asset_result['exceptions'])})")
+        ac1, ac2 = st.columns(2)
+        with ac1:
+            asset_files = st.file_uploader(
+                "Reported assets register (plate / borrower / expected owner)",
+                type=["csv", "xlsx", "xls"],
+                accept_multiple_files=True,
+                key="assets_up",
+            )
+        asset_check_files = None
+        with ac2:
+            if registry_source == "Upload a pre-run registry-check file":
+                asset_check_files = st.file_uploader(
+                    "Registry check results (independent evidence)",
+                    type=["csv", "xlsx", "xls"],
+                    accept_multiple_files=True,
+                    key="asset_checks_up",
+                )
+            else:
+                st.caption(
+                    f"Each reported plate will be looked up live against {asset_cfg.name}'s "
+                    "registry when you run verification below."
+                )
+
+        if st.button("Run asset verification", disabled=not asset_files, type="primary"):
+            asset_dir = OUT_ROOT / "_asset_uploads"
+            asset_paths = [_save_upload(f, asset_dir) for f in asset_files]
+            expected_assets = load_expected_assets(asset_paths)
+
+            if registry_source == "Upload a pre-run registry-check file":
+                asset_check_paths = [_save_upload(f, asset_dir) for f in (asset_check_files or [])]
+                registry_results = load_registry_results(asset_check_paths)
+            else:
+                client = make_client()
+                registry_results = {}
+                with st.spinner(
+                    f"Looking up {len(expected_assets)} plate(s) against {asset_cfg.name}'s registry..."
+                ):
+                    for a in expected_assets:
+                        plate = a["plate"]
+                        try:
+                            result = client.lookup(country_code, plate, asset_extra_inputs or None)
+                            status = result.get("status") or (
+                                "Found" if result.get("brand") or result.get("owner") else "No data"
+                            )
+                        except Exception as e:
+                            result = {}
+                            status = f"Error: {str(e)[:60]}"
+                        registry_results[plate] = {
+                            "plate": plate,
+                            "status": status,
+                            "propietario": result.get("owner", ""),
+                            "marca": result.get("brand", ""),
+                            "modelo": result.get("model", ""),
+                            "verified_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+
+            asset_exceptions = verify_asset_existence(expected_assets, registry_results)
+            st.session_state["asset_result"] = {
+                "summaries": [
+                    {
+                        "plate": a["plate"],
+                        "borrower": a.get("borrower", ""),
+                        "expected_owner": a.get("expected_owner", ""),
+                        "status": registry_results.get(a["plate"], {}).get("status", "(not checked)"),
+                        "registered_owner": registry_results.get(a["plate"], {}).get("propietario", ""),
+                        "brand": registry_results.get(a["plate"], {}).get("marca", ""),
+                        "model": registry_results.get(a["plate"], {}).get("modelo", ""),
+                        "verified_date": registry_results.get(a["plate"], {}).get("verified_date", ""),
+                    }
+                    for a in expected_assets
+                ],
+                "exceptions": asset_exceptions,
+                "coverage": (
+                    coverage_stats(
+                        sum(1 for a in expected_assets if a["plate"] in registry_results), len(expected_assets)
+                    )
+                    if expected_assets
+                    else None
+                ),
+            }
+
+        asset_result = st.session_state.get("asset_result")
+        if asset_result:
+            summaries = asset_result["summaries"]
+            cov = asset_result["coverage"] or {}
+            st.caption(
+                f"{cov.get('rows_ingested', 0)} of {len(summaries)} reported asset(s) checked against "
+                f"the registry ({cov.get('coverage_pct', 0):.1f}%)."
+            )
             st.dataframe(
-                pd.DataFrame(
-                    [
-                        {"Severity": e.severity, "Description": e.description, "Status": e.status}
-                        for e in asset_result["exceptions"]
-                    ]
+                pd.DataFrame(summaries).rename(
+                    columns={
+                        "plate": "Plate",
+                        "borrower": "Borrower",
+                        "expected_owner": "Expected owner",
+                        "status": "Registry status",
+                        "registered_owner": "Registered owner",
+                        "brand": "Brand",
+                        "model": "Model",
+                        "verified_date": "Verified date",
+                    }
                 ),
                 width="stretch",
                 hide_index=True,
             )
-        else:
-            st.success("No asset exceptions.")
-    else:
-        st.info("Upload a reported assets register and run verification to see results.")
 
-# ------------------------------------------------------- Vehicle verification
-with tab_vehicles:
-    st.subheader("Vehicle verification (registry API)")
-    st.caption(
-        "Look up vehicles against a third-party registry API (Verifik) by country "
-        "instead of driving a browser. CAPTCHA-free, multiple countries, and bulk "
-        "via Excel upload. Currently a scaffold: results come from a canned mock "
-        "(no credentials needed); wire `VerifikClient` + a `VERIFIK_TOKEN` to go live."
-    )
-
-    country_code = st.selectbox(
-        "Country",
-        options=list(COUNTRY_CONFIG),
-        format_func=lambda c: f"{COUNTRY_CONFIG[c].name} ({c})",
-        key="veh_country",
-    )
-    veh_cfg = COUNTRY_CONFIG[country_code]
-
-    mode = st.radio(
-        "Input mode",
-        ["Single plate", "Excel upload"],
-        horizontal=True,
-        key="veh_mode",
-    )
-
-    single_plates: list[str] = []
-    uploaded_df: Any = None
-    plate_col: Any = None
-    expected_col: Any = None
-    expected_label: str | None = None
-
-    if mode == "Single plate":
-        raw = st.text_input(
-            "Plate(s) — comma or newline separated",
-            placeholder="e.g. ABC-123, BCD-456",
-            key="veh_single_raw",
-        )
-        single_plates = [p.strip() for p in raw.replace(",", "\n").splitlines() if p.strip()]
-        st.caption(f"Ready to check: {len(single_plates)} plate(s).")
-    else:
-        upl = st.file_uploader(
-            "Workbook with plates (and optionally an expected-vehicle column)",
-            type=["xlsx", "xls", "csv"],
-            key="veh_upload",
-        )
-        if upl is not None:
-            try:
-                if upl.name.lower().endswith(".csv"):
-                    uploaded_df = pd.read_csv(upl)
-                else:
-                    uploaded_df = pd.read_excel(upl)
-            except Exception as e:
-                st.error(f"Could not read workbook: {e}")
-                uploaded_df = None
-        if uploaded_df is not None and not uploaded_df.empty:
-            st.caption("Preview (first rows):")
-            st.dataframe(uploaded_df.head(5), width="stretch", hide_index=True)
-            cols = [str(c) for c in uploaded_df.columns]
-            plate_col = st.selectbox("Plate column", options=cols, key="veh_plate_col")
-            expected_col = st.selectbox(
-                "Expected vehicle column (optional — enables Match/Partial/Mismatch)",
-                options=["(none)"] + cols,
-                index=0,
-                key="veh_expected_col",
-            )
-            expected_label = None if expected_col == "(none)" else expected_col
-
-    extra_inputs: dict[str, str] = {}
-    if veh_cfg.extra_inputs:
-        st.caption(f"{veh_cfg.name} needs extra details before lookup:")
-        extra_inputs = {
-            k: st.text_input(k.replace("_", " ").title(), key=f"veh_extra_{k}")
-            for k in veh_cfg.extra_inputs
-        }
-
-    def _row_for_plate(
-        plate: str,
-        expected_desc: str = "",
-        expected_label: str | None = None,
-    ) -> dict[str, Any]:
-        record = {k: "" for k in CANONICAL_FIELDS}
-        record["plate"] = plate
-        try:
-            result = make_client().lookup(country_code, plate, extra_inputs or None)
-            record.update(result)
-            record["status"] = result.get("status") or (
-                "Found" if result.get("brand") or result.get("owner") else "No data"
-            )
-            record["verdict"] = (
-                classify_expected(expected_desc, result.get("brand", ""), result.get("model", ""))
-                if expected_desc
-                else ""
-            )
-            record["expected_vehicle"] = expected_desc if (expected_desc and expected_label) else ""
-        except Exception as e:
-            record["status"] = f"Error: {str(e)[:60]}"
-            record["verdict"] = ""
-        record["verified_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return record
-
-    if st.button("Run vehicle verification", type="primary", key="veh_run"):
-        rows: list[dict[str, Any]] = []
-        if mode == "Single plate":
-            rows = [_row_for_plate(p) for p in single_plates]
-        elif uploaded_df is not None and plate_col is not None:
-            for _, rec in uploaded_df.iterrows():
-                plate = str(rec.get(plate_col, "")).strip()
-                if not plate:
-                    continue
-                expected_desc = (
-                    str(rec.get(expected_col, "")).strip() if expected_col and expected_col != "(none)" else ""
-                )
-                rows.append(_row_for_plate(plate, expected_desc, expected_label))
-        else:
-            st.warning("Provide plates (text or a workbook with a plate column) before running.")
-
-        if rows:
-            st.session_state["veh_result"] = {"rows": rows, "expected_label": expected_label}
-
-    veh_result = st.session_state.get("veh_result")
-    if veh_result:
-        rows = veh_result["rows"]
-        df = pd.DataFrame(verified_download_df(rows, veh_result["expected_label"]))
-        cols_show = [c for c in df.columns if c != "Expected vehicle" or (c == "Expected vehicle" and veh_result["expected_label"])]
-        st.dataframe(df[cols_show], width="stretch", hide_index=True)
-
-        found = sum(1 for r in rows if r.get("status") and not str(r["status"]).startswith(("Error", "No data", "")))
-        not_found = sum(1 for r in rows if r.get("status") == "No data")
-        errors = sum(1 for r in rows if str(r.get("status", "")).startswith("Error"))
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Found", found)
-        mc2.metric("Not found", not_found)
-        mc3.metric("Errors", errors)
-        mc4.metric("Total", len(rows))
-
-        if veh_result["expected_label"]:
-            issues = [r for r in rows if r.get("verdict") in ("Mismatch", "Partial Match")]
-            if issues:
-                st.subheader(f"Issues Found ({len(issues)})")
+            if asset_result["exceptions"]:
+                st.subheader(f"Exceptions ({len(asset_result['exceptions'])})")
                 st.dataframe(
-                    pd.DataFrame(verified_download_df(issues, veh_result["expected_label"])),
+                    pd.DataFrame(
+                        [
+                            {"Severity": e.severity, "Description": e.description, "Status": e.status}
+                            for e in asset_result["exceptions"]
+                        ]
+                    ),
                     width="stretch",
                     hide_index=True,
                 )
             else:
-                st.success("All expected vehicles matched the registry.")
+                st.success("No asset exceptions.")
+        else:
+            st.info("Upload a reported assets register and run verification to see results.")
 
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Verification Results", index=False)
-        st.download_button(
-            "Download verification results (.xlsx)",
-            data=buffer.getvalue(),
-            file_name=f"vehicle_verification_{country_code}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="veh_download",
-        )
     else:
-        st.info("Choose a country, enter plates (or upload a workbook), then run.")
+        st.caption(
+            "Look up vehicles against the registry by plate, no collateral register needed — "
+            "for ad hoc spot checks. Bulk via Excel upload, with an optional expected-vehicle "
+            "column to classify Match/Partial/Mismatch."
+        )
+
+        mode = st.radio(
+            "Input mode",
+            ["Single plate", "Excel upload"],
+            horizontal=True,
+            key="veh_mode",
+        )
+
+        single_plates: list[str] = []
+        uploaded_df: Any = None
+        plate_col: Any = None
+        expected_col: Any = None
+        expected_label: str | None = None
+
+        if mode == "Single plate":
+            raw = st.text_input(
+                "Plate(s) — comma or newline separated",
+                placeholder="e.g. ABC-123, BCD-456",
+                key="veh_single_raw",
+            )
+            single_plates = [p.strip() for p in raw.replace(",", "\n").splitlines() if p.strip()]
+            st.caption(f"Ready to check: {len(single_plates)} plate(s).")
+        else:
+            upl = st.file_uploader(
+                "Workbook with plates (and optionally an expected-vehicle column)",
+                type=["xlsx", "xls", "csv"],
+                key="veh_upload",
+            )
+            if upl is not None:
+                try:
+                    if upl.name.lower().endswith(".csv"):
+                        uploaded_df = pd.read_csv(upl)
+                    else:
+                        uploaded_df = pd.read_excel(upl)
+                except Exception as e:
+                    st.error(f"Could not read workbook: {e}")
+                    uploaded_df = None
+            if uploaded_df is not None and not uploaded_df.empty:
+                st.caption("Preview (first rows):")
+                st.dataframe(uploaded_df.head(5), width="stretch", hide_index=True)
+                cols = [str(c) for c in uploaded_df.columns]
+                plate_col = st.selectbox("Plate column", options=cols, key="veh_plate_col")
+                expected_col = st.selectbox(
+                    "Expected vehicle column (optional — enables Match/Partial/Mismatch)",
+                    options=["(none)"] + cols,
+                    index=0,
+                    key="veh_expected_col",
+                )
+                expected_label = None if expected_col == "(none)" else expected_col
+
+        def _row_for_plate(
+            plate: str,
+            expected_desc: str = "",
+            expected_label: str | None = None,
+        ) -> dict[str, Any]:
+            record = {k: "" for k in CANONICAL_FIELDS}
+            record["plate"] = plate
+            try:
+                result = make_client().lookup(country_code, plate, asset_extra_inputs or None)
+                record.update(result)
+                record["status"] = result.get("status") or (
+                    "Found" if result.get("brand") or result.get("owner") else "No data"
+                )
+                record["verdict"] = (
+                    classify_expected(expected_desc, result.get("brand", ""), result.get("model", ""))
+                    if expected_desc
+                    else ""
+                )
+                record["expected_vehicle"] = expected_desc if (expected_desc and expected_label) else ""
+            except Exception as e:
+                record["status"] = f"Error: {str(e)[:60]}"
+                record["verdict"] = ""
+            record["verified_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            return record
+
+        if st.button("Run vehicle verification", type="primary", key="veh_run"):
+            rows: list[dict[str, Any]] = []
+            if mode == "Single plate":
+                rows = [_row_for_plate(p) for p in single_plates]
+            elif uploaded_df is not None and plate_col is not None:
+                for _, rec in uploaded_df.iterrows():
+                    plate = str(rec.get(plate_col, "")).strip()
+                    if not plate:
+                        continue
+                    expected_desc = (
+                        str(rec.get(expected_col, "")).strip() if expected_col and expected_col != "(none)" else ""
+                    )
+                    rows.append(_row_for_plate(plate, expected_desc, expected_label))
+            else:
+                st.warning("Provide plates (text or a workbook with a plate column) before running.")
+
+            if rows:
+                st.session_state["veh_result"] = {"rows": rows, "expected_label": expected_label}
+
+        veh_result = st.session_state.get("veh_result")
+        if veh_result:
+            rows = veh_result["rows"]
+            df = pd.DataFrame(verified_download_df(rows, veh_result["expected_label"]))
+            cols_show = [
+                c for c in df.columns if c != "Expected vehicle" or (c == "Expected vehicle" and veh_result["expected_label"])
+            ]
+            st.dataframe(df[cols_show], width="stretch", hide_index=True)
+
+            found = sum(1 for r in rows if r.get("status") and not str(r["status"]).startswith(("Error", "No data", "")))
+            not_found = sum(1 for r in rows if r.get("status") == "No data")
+            errors = sum(1 for r in rows if str(r.get("status", "")).startswith("Error"))
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Found", found)
+            mc2.metric("Not found", not_found)
+            mc3.metric("Errors", errors)
+            mc4.metric("Total", len(rows))
+
+            if veh_result["expected_label"]:
+                issues = [r for r in rows if r.get("verdict") in ("Mismatch", "Partial Match")]
+                if issues:
+                    st.subheader(f"Issues Found ({len(issues)})")
+                    st.dataframe(
+                        pd.DataFrame(verified_download_df(issues, veh_result["expected_label"])),
+                        width="stretch",
+                        hide_index=True,
+                    )
+                else:
+                    st.success("All expected vehicles matched the registry.")
+
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="Verification Results", index=False)
+            st.download_button(
+                "Download verification results (.xlsx)",
+                data=buffer.getvalue(),
+                file_name=f"vehicle_verification_{country_code}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="veh_download",
+            )
+        else:
+            st.info("Choose a country, enter plates (or upload a workbook), then run.")
 
 # --------------------------------------------------------------- Review tab
 with tab_review:
