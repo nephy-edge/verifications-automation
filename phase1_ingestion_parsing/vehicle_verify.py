@@ -99,16 +99,21 @@ COUNTRY_CONFIG: dict[str, CountryConfig] = {
             CountryConfig(
                 code="MX",
                 name="Mexico",
+                # UNCONFIRMED: GET /v2/mx/vehiculo/placa consistently returned
+                # "500 InternalServerError: 501" for three different test plates —
+                # either the path is wrong or this product isn't on this account's
+                # plan. field_map below is the best publicly-documented guess,
+                # not verified against a real response; VerifikClient._call
+                # refuses this country until a real 200 is actually observed.
                 primary_endpoint="vehiculo/placa",
                 field_map={
-                    "placa": "plate",
-                    "marca": "brand",
-                    "modelo": "model",
-                    "anio": "year",
-                    "niv": "vin",
-                    "propietario": "owner",
-                    "color": "color",
-                    "estado": "status",
+                    "plate": "plate",
+                    "make": "brand",
+                    "model": "model",
+                    "year": "year",
+                    "vin": "vin",
+                    "owner": "owner",
+                    "status": "status",
                 },
             ),
         ),
@@ -117,19 +122,24 @@ COUNTRY_CONFIG: dict[str, CountryConfig] = {
             CountryConfig(
                 code="CO",
                 name="Colombia",
-                primary_endpoint="fasecolda/values-by-plate",
+                # Confirmed with a real, authenticated live call (not docs): GET
+                # /v2/co/runt/vehicle-by-plate-simplified?plate=&documentType=&
+                # documentNumber= -> {"data": {"plate": ..., "vehicle": {"marca",
+                # "linea", "modelo" (this is the YEAR, not a model — RUNT quirk),
+                # "color", "estadoDelVehiculo", "noVin", ...}}}. No owner field —
+                # RUNT ties ownership to the document number you queried with,
+                # doesn't hand back a name.
+                primary_endpoint="runt/vehicle-by-plate-simplified",
                 field_map={
-                    "placa": "plate",
+                    "plate": "plate",
                     "marca": "brand",
                     "linea": "model",
                     "modelo": "year",
-                    "vin": "vin",
-                    "propietario": "owner",
+                    "novin": "vin",
                     "color": "color",
-                    "estado": "status",
+                    "estadodelvehiculo": "status",
                 },
                 extra_inputs=("document_type", "document_number"),
-                extra_endpoints=("runt/lookup",),
             ),
         ),
         (
@@ -137,18 +147,21 @@ COUNTRY_CONFIG: dict[str, CountryConfig] = {
             CountryConfig(
                 code="CL",
                 name="Chile",
-                primary_endpoint="vehiculo/placa",
+                # Confirmed with a real, authenticated live call: GET /v2/cl/
+                # vehicle?plate=... -> {"data": {"plate","mark" (not "brand"!),
+                # "model","year","chasisNumber","color","owner","rut","fines",
+                # "type",...}}. The only country confirmed to actually return an
+                # owner name (a real live test returned a genuine company name).
+                primary_endpoint="vehicle",
                 field_map={
-                    "patente": "plate",
-                    "marca": "brand",
-                    "modelo": "model",
-                    "ano": "year",
-                    "vin": "vin",
-                    "propietario": "owner",
+                    "plate": "plate",
+                    "mark": "brand",
+                    "model": "model",
+                    "year": "year",
+                    "chasisnumber": "vin",
+                    "owner": "owner",
                     "color": "color",
-                    "estado": "status",
                 },
-                extra_endpoints=("registro/estado",),
             ),
         ),
         (
@@ -156,16 +169,16 @@ COUNTRY_CONFIG: dict[str, CountryConfig] = {
             CountryConfig(
                 code="AR",
                 name="Argentina",
-                primary_endpoint="vehiculo/dominio",
+                # Confirmed with a real, authenticated live call (twice, two
+                # plates): GET /v2/ar/vehicle?plate=... -> {"data": {"plate",
+                # "brand","model","year","type","version",...}}. No owner, no
+                # color, no VIN/chassis field on this endpoint at all.
+                primary_endpoint="vehicle",
                 field_map={
-                    "dominio": "plate",
-                    "marca": "brand",
-                    "modelo": "model",
-                    "ano": "year",
-                    "vin": "vin",
-                    "titular": "owner",
-                    "color": "color",
-                    "estado": "status",
+                    "plate": "plate",
+                    "brand": "brand",
+                    "model": "model",
+                    "year": "year",
                 },
             ),
         ),
@@ -174,16 +187,20 @@ COUNTRY_CONFIG: dict[str, CountryConfig] = {
             CountryConfig(
                 code="BR",
                 name="Brazil",
-                primary_endpoint="veiculo/placa",
+                # Confirmed with a real, authenticated live call: GET /v2/br/
+                # vehicle?plate=... -> {"data": {"plate","brand","model",
+                # "modelYear" (the real year field — confirmed by the API's own
+                # error text on a bad plate: "..._does_not_have_modelYear"),
+                # "color",...}}. No owner field; "chassis" appears in Verifik's
+                # docs but was empty/absent on the one real success observed, so
+                # left unmapped rather than guessed.
+                primary_endpoint="vehicle",
                 field_map={
-                    "placa": "plate",
-                    "marca": "brand",
-                    "modelo": "model",
-                    "ano": "year",
-                    "chassi": "vin",
-                    "proprietario": "owner",
-                    "cor": "color",
-                    "situacao": "status",
+                    "plate": "plate",
+                    "brand": "brand",
+                    "model": "model",
+                    "modelyear": "year",
+                    "color": "color",
                 },
             ),
         ),
@@ -192,16 +209,21 @@ COUNTRY_CONFIG: dict[str, CountryConfig] = {
             CountryConfig(
                 code="EC",
                 name="Ecuador",
-                primary_endpoint="vehiculo/placa",
+                # UNCONFIRMED: GET /v2/ec/vehiculo/placa/multas?plate=... is a
+                # real, reachable endpoint (auth accepted, clean structured 404
+                # for an unregistered plate) but no test plate returned an
+                # actual 200, so the success shape below is sourced from public
+                # docs only, not a real observed response. It's also a *fines*
+                # endpoint, not a general vehicle-info one — no owner field, and
+                # brand/model come bundled in one "model" string rather than
+                # separate fields. VerifikClient._call refuses this country
+                # until a real 200 is actually observed.
+                primary_endpoint="vehiculo/placa/multas",
                 field_map={
-                    "placa": "plate",
-                    "marca": "brand",
-                    "modelo": "model",
-                    "ano": "year",
-                    "vin": "vin",
-                    "propietario": "owner",
-                    "color": "color",
-                    "estado": "status",
+                    "plate": "plate",
+                    "model": "model",
+                    "year": "year",
+                    "status": "status",
                 },
             ),
         ),
@@ -308,23 +330,63 @@ class MockVehicleClient:
             },
             "signature": {"dateTime": "August 1, 2022 5:23 PM", "message": "Certified by Verifik.co"},
         },
+        # MX and EC are still unconfirmed against a real response (see their
+        # CountryConfig comments) — these two samples remain best-effort guesses.
         "MX": {
             "ok": True,
-            "data": {"placa": "{PLATE}", "marca": "Nissan", "niv": "3N1AB7AP3LY123456", "anio": "2020"},
+            "data": {"plate": "{PLATE}", "make": "Nissan", "model": "Sentra", "year": "2020"},
         },
+        # CO/CL/AR/BR below mirror the real shape confirmed by an actual live
+        # call (see each CountryConfig comment), not a guess.
         "CO": {
-            "runt": {
-                "placa": "{PLATE}",
-                "marca": "Renault",
-                "linea": "Logan",
-                "modelo": "2019",
-                "propietario": "Carlos Gomez",
+            "data": {
+                "plate": "{PLATE}",
+                "documentType": "CC",
+                "documentNumber": "123456789",
+                "vehicle": {
+                    "marca": "Renault",
+                    "linea": "Logan",
+                    "modelo": "2019",
+                    "color": "Gris",
+                    "estadoDelVehiculo": "ACTIVO",
+                    "noVin": "8A1BSCD1234567890",
+                },
             }
         },
-        "CL": {"registro": {"patente": "{PLATE}", "marca": "Chevrolet", "modelo": "Sail", "ano": "2018"}},
-        "AR": {"dominio": {"dominio": "{PLATE}", "marca": "Volkswagen", "modelo": "Gol", "titular": "Ana Diaz"}},
-        "BR": {"veiculo": {"placa": "{PLATE}", "marca": "Fiat", "modelo": "Uno", "ano": "2017"}},
-        "EC": {"vehiculo": {"placa": "{PLATE}", "marca": "Hyundai", "modelo": "Accent", "ano": "2016"}},
+        "CL": {
+            "data": {
+                "plate": "{PLATE}",
+                "mark": "Chevrolet",
+                "model": "Sail",
+                "year": "2018",
+                "chasisNumber": "9BWZZZ377VT004251",
+                "owner": "Transportes Andina Ltda.",
+                "color": "Gris",
+                "fines": "NO POSEE MULTAS",
+            },
+            "signature": {"dateTime": "August 1, 2022 5:23 PM", "message": "Certified by Verifik.co"},
+        },
+        "AR": {
+            "data": {
+                "plate": "{PLATE}",
+                "brand": "Volkswagen",
+                "model": "Gol",
+                "year": "2015",
+                "type": "AUTOMOVIL",
+            },
+            "signature": {"dateTime": "August 1, 2022 5:23 PM", "message": "Certified by Verifik.co"},
+        },
+        "BR": {
+            "data": {
+                "plate": "{PLATE}",
+                "brand": "Fiat",
+                "model": "Uno",
+                "modelYear": "2017",
+                "color": "Branco",
+            },
+            "signature": {"dateTime": "August 1, 2022 5:23 PM", "message": "Certified by Verifik.co"},
+        },
+        "EC": {"data": {"plate": "{PLATE}", "model": "Accent 1.6", "year": "2016", "status": "ASIGNADO"}},
     }
 
     def lookup(self, country: str, plate: str, extra: dict[str, str] | None = None) -> dict[str, Any]:
@@ -337,23 +399,29 @@ class MockVehicleClient:
 class VerifikClient:
     """Real Verifik registry client.
 
-    READ BEFORE ENABLING FOR A NEW COUNTRY: the live contract (exact request
-    method/params, header, response shape) must be confirmed against
-    docs.verifik.co before `_call` handles it — guessing would ship a broken
-    integration that looks like it works.
+    READ BEFORE ENABLING FOR A NEW COUNTRY: the contract (exact request
+    method/params, header, response shape) must be confirmed with a real,
+    authenticated call before `_call` handles it — public docs alone aren't
+    trustworthy enough here (docs.verifik.co's own pages contradicted each
+    other on Mexico's response shape during development — one fabricated an
+    "owner" field that a second, independently-rendered source flatly denied
+    existed). Every country below marked "confirmed" was checked against a
+    real live response, not just documentation.
 
-    Confirmed so far (docs.verifik.co/vehicle-validation/peru/peruvian-vehicle):
-      GET https://api.verifik.co/v2/pe/vehiculo/placa?plate=<plate>
-      Authorization: Bearer <VERIFIK_TOKEN>
-      -> {"data": {"plate", "brand", "model", "year", "chasisSerial", ...}}
-      No owner/color/status field exists on this endpoint — Peru's
-      owner_mismatch check (phase2_verification_engine/assets.py) can't be
-      backed by this endpoint alone; that needs a separate, still-unconfirmed
-      Verifik product (SUNARP/"Full ID").
+    Confirmed via a real live call:
+      PE: GET /v2/pe/vehiculo/placa?plate=      -> data.{plate,brand,model,year,chasisSerial,...}, no owner/color/status
+      CO: GET /v2/co/runt/vehicle-by-plate-simplified?plate=&documentType=&documentNumber= -> data.vehicle.{marca,linea,modelo(=year),color,estadoDelVehiculo,noVin}, no owner
+      CL: GET /v2/cl/vehicle?plate=              -> data.{plate,mark,model,year,chasisNumber,owner,color,...} — the only one with real owner data
+      AR: GET /v2/ar/vehicle?plate=              -> data.{plate,brand,model,year,type,version}, no owner/color/vin
+      BR: GET /v2/br/vehicle?plate=              -> data.{plate,brand,model,modelYear,color,...}, no owner
 
-    Every other country's endpoint is still unconfirmed, so `_call` raises
-    `NotImplementedError` for them rather than guessing — that surfaces as a
-    clear per-row error in the UI, not silent wrong data.
+    Still unconfirmed (raise NotImplementedError rather than guess):
+      MX: same path pattern as PE, but 3 different test plates all returned a
+          consistent "500 InternalServerError: 501" — either the path is wrong
+          or this product isn't enabled on this account's plan.
+      EC: endpoint is reachable and auth is accepted (a clean structured 404
+          came back for an unregistered plate), but no test plate ever
+          produced a real 200 to confirm the success shape against.
     """
 
     # Read at call time, not at class-definition time: `make_client()` is
@@ -384,15 +452,33 @@ class VerifikClient:
         flat = flatten_json(response)
         return apply_field_map(flat, cfg)
 
+    # Country code -> (URL path segment after /v2/<cc>/, extra query params to
+    # forward beyond `plate`). Only countries confirmed via a real live call.
+    _CONFIRMED_PATHS: dict[str, tuple[str, tuple[str, ...]]] = {
+        "PE": ("vehiculo/placa", ()),
+        "CO": ("runt/vehicle-by-plate-simplified", ("document_type", "document_number")),
+        "CL": ("vehicle", ()),
+        "AR": ("vehicle", ()),
+        "BR": ("vehicle", ()),
+    }
+    # extra_inputs keys use snake_case; Verifik's own query params are camelCase.
+    _PARAM_RENAME = {"document_type": "documentType", "document_number": "documentNumber"}
+
     def _call(self, cfg: CountryConfig, plate: str, extra: dict[str, str]) -> Any:
-        if cfg.code != "PE":
+        if cfg.code not in self._CONFIRMED_PATHS:
             raise NotImplementedError(
-                f"VerifikClient._call not yet confirmed for {cfg.code} — its real request/"
-                f"response contract for endpoint '{cfg.primary_endpoint}' hasn't been verified "
-                "against docs.verifik.co yet, so this refuses to guess."
+                f"VerifikClient._call not yet confirmed for {cfg.code} — see the VerifikClient "
+                "docstring for what was actually tried and why it isn't wired up live."
             )
-        url = f"{self._base_url}/v2/pe/vehiculo/placa?{urllib.parse.urlencode({'plate': plate})}"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self._token}"})
+        path, extra_keys = self._CONFIRMED_PATHS[cfg.code]
+        params = {"plate": plate}
+        for key in extra_keys:
+            if extra.get(key):
+                params[self._PARAM_RENAME.get(key, key)] = extra[key]
+        url = f"{self._base_url}/v2/{cfg.code.lower()}/{path}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+        )
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 return json.loads(resp.read().decode("utf-8"))
@@ -415,8 +501,8 @@ def _deep_replace(node: Any, needle: str, replacement: str) -> Any:
 def make_client() -> VehicleClient:
     """Live client when a token is configured, mock otherwise.
 
-    Only Peru's endpoint is actually confirmed (see VerifikClient docstring) —
-    every other country will raise a clear NotImplementedError per lookup
+    PE/CO/CL/AR/BR are confirmed against a real live call (see VerifikClient
+    docstring); MX and EC will raise a clear NotImplementedError per lookup
     once live, rather than silently returning mock data next to a real token.
     """
     if os.getenv("VERIFIK_TOKEN", ""):

@@ -48,7 +48,19 @@ def test_colombia_maps_modelo_as_year_and_linea_as_model():
     assert result["plate"] == "LIVE1"
     assert result["year"] == "2019"      # RUNT "modelo" is actually the year
     assert result["model"] == "Logan"    # "linea" is the model
-    assert result["owner"] == "Carlos Gomez"
+    # Confirmed via a real live call: RUNT's simplified endpoint has no owner
+    # field at all — ownership is implied by the document number you query
+    # with, not handed back in the response.
+    assert result["owner"] == ""
+
+
+def test_chile_returns_a_real_owner_field():
+    # Chile is the only confirmed-live country whose endpoint actually
+    # returns an owner name (verified against a real API response).
+    result = make_client().lookup("CL", "LIVE1")
+    assert result["plate"] == "LIVE1"
+    assert result["brand"] == "Chevrolet"  # Chile's source field is "mark", not "brand"
+    assert result["owner"] == "Transportes Andina Ltda."
 
 
 def test_every_country_has_a_primary_endpoint_and_plate_roundtrip():
