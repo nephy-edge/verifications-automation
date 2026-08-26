@@ -591,3 +591,25 @@ User noticed the overlap directly: both tabs answered "is this vehicle/owner wha
 Both modes now share the same `country_code`/`asset_extra_inputs` state and the same `make_client()` call site — the actual "merge": one registry-lookup mechanism now backs both the ad hoc UI and the audit exception pipeline, instead of two.
 
 **Verified**: `py_compile` clean, `AppTest` boots with 0 exceptions, full suite still 94/94 passed (no test referenced the old tab structure, so nothing needed updating there). README's tab list updated (five tabs, not six) to describe the merged capability and its two modes.
+
+## 2026-08-26 — Verifik actually goes live (Peru only)
+
+User asked why a plate lookup returned "random data" instead of calling Verifik. Root cause: `make_client()` was hardcoded to always return `MockVehicleClient()` — it never even checked `VERIFIK_TOKEN`, so having a real token in `.env` changed nothing. Separately, `VerifikClient._call()` was still the documented `NotImplementedError` scaffold from the vehicle-verification port, since nobody had confirmed the real wire format yet.
+
+Looked up Verifik's own docs (`docs.verifik.co/vehicle-validation/peru/peruvian-vehicle`) via web search/fetch rather than guessing, and confirmed the real, current contract for Peru:
+- `GET https://api.verifik.co/v2/pe/vehiculo/placa?plate=<plate>`, `Authorization: Bearer <token>`
+- Response: `{"data": {"plate","use","type","brand","model","year","engineSerial","chasisSerial","seats","validFormat","serial"}, "signature": {...}}`
+- **No owner/color/status field on this endpoint at all.** The pre-existing `COUNTRY_CONFIG["PE"].field_map` had been guessed against Spanish field names (`marca`/`modelo`/`propietario`/`estado`/`color`) that don't exist in the real response — so even flipping `make_client()` alone would have silently returned all-blank fields.
+
+Surfaced this gap to the user before implementing (owner-based checks can't be backed by this endpoint; Verifik's separate SUNARP/"Full ID" product might have `propietarios` per search results, but its contract isn't publicly documented and wasn't confirmed) — user chose to go live with brand/model/year now and leave owner verification unavailable for Peru rather than block on chasing that second product.
+
+**Changes** (`phase1_ingestion_parsing/vehicle_verify.py`):
+- `COUNTRY_CONFIG["PE"].field_map` corrected to the real English field names (`plate`/`brand`/`model`/`year`/`chasisserial`→vin); owner/color/status intentionally left unmapped (no source data).
+- `MockVehicleClient._SAMPLES["PE"]` rewritten to mirror the real response shape (nested under `"data"`/`"signature"`, no owner/color/status) so the mock's gaps match the live gaps instead of a friendlier fiction.
+- `VerifikClient._call()`: implemented for real for `PE` only (`urllib.request` GET with the Bearer header, matching the rest of the codebase's HTTP pattern — no new dependency). Every other country still raises `NotImplementedError` with a clear per-row error message, on purpose — still unconfirmed, refuses to guess.
+- `VerifikClient.TOKEN`/`BASE_URL` moved from class-level attributes (evaluated via `os.getenv()` at import time) to `@property` (evaluated at call time) — a real bug: `app/streamlit_app.py` imports this module *before* it calls `load_dotenv()`, so the old class-level read would have frozen `TOKEN` empty forever regardless of what's in `.env`.
+- `make_client()` now returns `VerifikClient()` whenever `VERIFIK_TOKEN` is set, `MockVehicleClient()` otherwise.
+
+**Verified against the real API, twice**: first with the user's then-current token — got a clean, real `403 token_expired` (decoded the JWT's `expiresAt` claim to confirm: issued 2026-07-13, expired 2026-08-13, 13 days stale). User rotated the token in Verifik's dashboard and updated both `.env` and Streamlit Cloud secrets; re-ran the same live lookup and got a genuine registry hit for a test plate: `TOYOTA TERCEL 1.3, 1992, VIN 13DE3123DE` (owner/color/status correctly blank, matching the confirmed endpoint's real gap, not a bug). `py_compile` clean, full suite still 94/94 (no test asserted on PE's old mock field values). Pushed to the deployed repo.
+
+**Known open**: owner verification for Peru still needs Verifik's SUNARP/Full-ID product contract confirmed (from the user's own account dashboard/API reference, since public docs don't expose it) before `verify_asset_existence`'s owner_mismatch check can be backed by live data there. Every non-PE country is still mock-only until each one's real contract is likewise confirmed rather than guessed.

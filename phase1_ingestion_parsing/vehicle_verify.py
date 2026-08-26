@@ -26,7 +26,11 @@ The canonical record returned by any client is a flat dict with the fields in
 
 from __future__ import annotations
 
+import json
 import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
@@ -75,18 +79,18 @@ COUNTRY_CONFIG: dict[str, CountryConfig] = {
             CountryConfig(
                 code="PE",
                 name="Peru",
+                # Confirmed against Verifik's own docs (docs.verifik.co/vehicle-validation/
+                # peru/peruvian-vehicle): GET /v2/pe/vehiculo/placa?plate=... returns
+                # English field names, nested under "data" — no owner/color/status field
+                # at all (that would need a separate, unconfirmed SUNARP/"Full ID"
+                # product). `chasisSerial` is the closest thing to a VIN this endpoint has.
                 primary_endpoint="vehiculo/placa",
                 field_map={
-                    "placa": "plate",
-                    "marca": "brand",
-                    "modelo": "model",
-                    "ano": "year",
-                    "anio": "year",
-                    "vin": "vin",
-                    "nserie": "vin",
-                    "propietario": "owner",
-                    "color": "color",
-                    "estado": "status",
+                    "plate": "plate",
+                    "brand": "brand",
+                    "model": "model",
+                    "year": "year",
+                    "chasisserial": "vin",
                 },
             ),
         ),
@@ -285,17 +289,24 @@ class MockVehicleClient:
     """
 
     _SAMPLES: dict[str, dict[str, Any]] = {
+        # Matches the real Verifik response shape (see CountryConfig.field_map's
+        # comment) so the mock exercises the same no-owner/no-color/no-status gap
+        # the live client actually has, rather than a friendlier fiction.
         "PE": {
-            "success": True,
-            "vehiculo": {
-                "placa": "{PLATE}",
-                "marca": "Toyota",
-                "modelo": "Corolla",
-                "anio": "2021",
-                "propietario": "Maria Perez",
-                "color": "Blanco",
-                "estado": "activo",
+            "data": {
+                "plate": "{PLATE}",
+                "use": "PARTICULAR",
+                "type": "AUTOMOVIL",
+                "brand": "Toyota",
+                "model": "Corolla",
+                "year": "2021",
+                "engineSerial": "HR123456789J",
+                "chasisSerial": "JT2AE09W5M0123456",
+                "seats": "5",
+                "validFormat": True,
+                "serial": "JT2AE09W5M0123456",
             },
+            "signature": {"dateTime": "August 1, 2022 5:23 PM", "message": "Certified by Verifik.co"},
         },
         "MX": {
             "ok": True,
@@ -326,27 +337,36 @@ class MockVehicleClient:
 class VerifikClient:
     """Real Verifik registry client.
 
-    READ BEFORE ENABLING: the live contract (exact request method/body, header
-    name or expected response shape per endpoint in `COUNTRY_CONFIG`) must be
-    confirmed against api.verifik.co before this is used in anger — the mock
-    response shapes above are illustrative, not the real wire format.
+    READ BEFORE ENABLING FOR A NEW COUNTRY: the live contract (exact request
+    method/params, header, response shape) must be confirmed against
+    docs.verifik.co before `_call` handles it — guessing would ship a broken
+    integration that looks like it works.
 
-    Plumbed but intentionally not wired-up: the tab defaults to
-    `MockVehicleClient` so nothing here needs a token. To go live:
-      1. Set `VERIFIK_TOKEN` (Bearer token) in `verifications-automation/.env`
-         or Streamlit secrets.
-      2. Fill `_call`'s request against the real endpoint + confirm the
-         response->canonical mapping (flatten + `apply_field_map` already do
-         the heavy lifting once the JSON comes back as nested data).
-      3. Flip `make_client()` to return `VerifikClient()`.
+    Confirmed so far (docs.verifik.co/vehicle-validation/peru/peruvian-vehicle):
+      GET https://api.verifik.co/v2/pe/vehiculo/placa?plate=<plate>
+      Authorization: Bearer <VERIFIK_TOKEN>
+      -> {"data": {"plate", "brand", "model", "year", "chasisSerial", ...}}
+      No owner/color/status field exists on this endpoint — Peru's
+      owner_mismatch check (phase2_verification_engine/assets.py) can't be
+      backed by this endpoint alone; that needs a separate, still-unconfirmed
+      Verifik product (SUNARP/"Full ID").
 
-    Left as a self-documenting scaffold on purpose: guessing the wire format
-    would ship a broken integration, so the endpoint call is the only part
-    kept open.
+    Every other country's endpoint is still unconfirmed, so `_call` raises
+    `NotImplementedError` for them rather than guessing — that surfaces as a
+    clear per-row error in the UI, not silent wrong data.
     """
 
-    BASE_URL = os.getenv("VERIFIK_BASE_URL", "https://api.verifik.co").rstrip("/")
-    TOKEN = os.getenv("VERIFIK_TOKEN", "")
+    # Read at call time, not at class-definition time: `make_client()` is
+    # typically called well after `load_dotenv()` runs, but the *module*
+    # import (and so this class body) happens before it — a class-level
+    # `os.getenv(...)` here would freeze empty even with a real token on disk.
+    @property
+    def _base_url(self) -> str:
+        return os.getenv("VERIFIK_BASE_URL", "https://api.verifik.co").rstrip("/")
+
+    @property
+    def _token(self) -> str:
+        return os.getenv("VERIFIK_TOKEN", "")
 
     def lookup(
         self,
@@ -354,7 +374,7 @@ class VerifikClient:
         plate: str,
         extra: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        if not self.TOKEN:
+        if not self._token:
             raise RuntimeError(
                 "VERIFIK_TOKEN is not configured — set it in the app's .env/secrets "
                 "to use the live registry API."
@@ -365,14 +385,20 @@ class VerifikClient:
         return apply_field_map(flat, cfg)
 
     def _call(self, cfg: CountryConfig, plate: str, extra: dict[str, str]) -> Any:
-        # Scaffold: `cfg.primary_endpoint`, `plate`, and `extra` are all we
-        # know for sure. The exact request envelope + how to unwrap the nested
-        # response belongs here once verified against the live API.
-        raise NotImplementedError(
-            f"VerifikClient._call not yet implemented for {cfg.code} — fill in the "
-            f"real request/response mapping for endpoint '{cfg.primary_endpoint}', "
-            "then this returns the nested JSON for flatten_json() to handle."
-        )
+        if cfg.code != "PE":
+            raise NotImplementedError(
+                f"VerifikClient._call not yet confirmed for {cfg.code} — its real request/"
+                f"response contract for endpoint '{cfg.primary_endpoint}' hasn't been verified "
+                "against docs.verifik.co yet, so this refuses to guess."
+            )
+        url = f"{self._base_url}/v2/pe/vehiculo/placa?{urllib.parse.urlencode({'plate': plate})}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self._token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:200]
+            raise RuntimeError(f"Verifik API returned {e.code}: {body}") from e
 
 
 def _deep_replace(node: Any, needle: str, replacement: str) -> Any:
@@ -386,8 +412,15 @@ def _deep_replace(node: Any, needle: str, replacement: str) -> Any:
     return node
 
 
-# Flip this to `VerifikClient()` to go live (see VerifikClient docstring).
 def make_client() -> VehicleClient:
+    """Live client when a token is configured, mock otherwise.
+
+    Only Peru's endpoint is actually confirmed (see VerifikClient docstring) —
+    every other country will raise a clear NotImplementedError per lookup
+    once live, rather than silently returning mock data next to a real token.
+    """
+    if os.getenv("VERIFIK_TOKEN", ""):
+        return VerifikClient()
     return MockVehicleClient()
 
 
