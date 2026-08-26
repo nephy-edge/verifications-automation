@@ -245,6 +245,17 @@ def _leaf_key(key: str) -> str:
     return "".join(ch for ch in key.strip().lower() if ch.isalnum())
 
 
+def clean_plate(plate: str) -> str:
+    """Normalize a plate for lookup: uppercase, alphanumeric only.
+
+    Verifik's own docs are explicit that a plate must be submitted "without
+    spaces or points" — a plate typed/uploaded as "ABC-123", "abc 123", or
+    "ABC.123" all resolve to the same lookup key "ABC123" so dashes, dots,
+    and spaces never cause a spurious miss against the live registry.
+    """
+    return "".join(ch for ch in plate.strip().upper() if ch.isalnum())
+
+
 def flatten_json(node: Any) -> dict[str, str]:
     """Recursively flatten nested JSON into a leaf-field map.
 
@@ -392,7 +403,7 @@ class MockVehicleClient:
     def lookup(self, country: str, plate: str, extra: dict[str, str] | None = None) -> dict[str, Any]:
         cfg = COUNTRY_CONFIG[country]
         sample = self._SAMPLES.get(country, {})
-        flat = flatten_json(_deep_replace(sample, "{PLATE}", plate))
+        flat = flatten_json(_deep_replace(sample, "{PLATE}", clean_plate(plate)))
         return apply_field_map(flat, cfg)
 
 
@@ -448,7 +459,7 @@ class VerifikClient:
                 "to use the live registry API."
             )
         cfg = COUNTRY_CONFIG[country]
-        response = self._call(cfg, plate, extra or {})
+        response = self._call(cfg, clean_plate(plate), extra or {})
         flat = flatten_json(response)
         return apply_field_map(flat, cfg)
 
