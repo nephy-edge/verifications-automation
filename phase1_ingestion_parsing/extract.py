@@ -35,12 +35,17 @@ figure the A5/B3 cash-balance check actually needs — a point-in-time
 balance, not a sum of transaction amounts).
 
 For a genuinely scanned/image-only PDF (no text layer at all), `ocr.py`
-provides a Tesseract-based fallback: it OCRs the rendered pages into text and
-feeds that text through the same flat-text layouts above, rather than a
-separate parser — OCR only changes how the text is obtained. OCR rows are
-capped below the B3 confidence floor regardless of tie-out (see
-`_extract_from_ocr`), and degrade to the existing placeholder when the
-`tesseract` binary isn't installed or OCR finds nothing.
+provides a Tesseract-based fallback. Two OCR modes, tried in order:
+  1. `_extract_numbered_table_from_ocr` re-OCRs into a *searchable* PDF (a
+     positioned, invisible text layer) and runs layout 4's coordinate-based
+     column mapper against it — the one layout a flat OCR string can never
+     recover, since it needs each word's x-position on the page.
+  2. `_extract_from_ocr` OCRs into flat text and feeds it through the same
+     flat-text layouts 1-3 above, rather than a separate parser — OCR only
+     changes how the text is obtained.
+OCR rows are capped below the B3 confidence floor regardless of tie-out, and
+degrade to the existing placeholder when the `tesseract` binary isn't
+installed or neither mode finds anything.
 
 `extract_prompt.txt` defines a separate LLM extraction contract (D2 -> rules
 over time) for cases neither rules nor OCR resolve; it is not yet wired to any
@@ -51,11 +56,12 @@ parsed amounts are parsed again into floats here.
 from __future__ import annotations
 
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from phase1_ingestion_parsing.ingest import DIR_IN, DIR_OUT, _looks_like_header
-from phase1_ingestion_parsing.ocr import ocr_extract_text
+from phase1_ingestion_parsing.ocr import ocr_extract_text, ocr_to_searchable_pdf
 
 try:
     import pdfplumber
@@ -757,6 +763,50 @@ def _extract_from_ocr(path: str | Path, account_ref: str) -> list[dict[str, Any]
     return ocr_rows
 
 
+def _extract_numbered_table_from_ocr(path: str | Path, account_ref: str) -> list[dict[str, Any]] | None:
+    """OCR a scanned PDF into a searchable PDF and try the coordinate-based
+    numbered-table layout against it — the one layout `_extract_from_ocr`'s
+    flat text can never recover, since `_scan_numbered_table` maps tokens to
+    columns by each word's x-position, information a flat string doesn't
+    carry. Returns None (not just []) whenever this path isn't usable or the
+    statement isn't this layout, so the caller falls through to the existing
+    flat-text OCR fallback exactly as before — this only adds a path, it
+    doesn't replace one.
+
+    Runs its own OCR pass independent of `_extract_from_ocr`'s (rather than
+    sharing one) to keep the well-tested flat-text path untouched; the extra
+    Tesseract pass only happens for a genuine scan, not on every PDF.
+    """
+    if pdfplumber is None:
+        return None
+    try:
+        pdf_bytes = Path(path).read_bytes()
+    except OSError:
+        return None
+    searchable_pdf_bytes = ocr_to_searchable_pdf(pdf_bytes)
+    if searchable_pdf_bytes is None:
+        return None
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    try:
+        tmp.write(searchable_pdf_bytes)
+        tmp.close()
+        table_rows = _scan_numbered_table(tmp.name, account_ref)
+        if not table_rows:
+            return None
+        text = extract_pdf_text(tmp.name)
+        shape = detect_shape(text)
+        _apply_layout_confidence(table_rows, text, shape)
+        _stamp_currency(table_rows, shape)
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
+
+    for r in table_rows:
+        r["confidence"] = min(r.get("confidence", 1.0), 0.6)
+        r["ocr"] = True
+    return table_rows
+
+
 def extract_pdf(path: str | Path, account_ref: str = "") -> list[dict[str, Any]]:
     """Parse a PDF statement into canonical records with confidence scores.
 
@@ -775,6 +825,9 @@ def extract_pdf(path: str | Path, account_ref: str = "") -> list[dict[str, Any]]
     """
     text = extract_pdf_text(path)
     if not text.strip():
+        numbered_table_rows = _extract_numbered_table_from_ocr(path, account_ref)
+        if numbered_table_rows is not None:
+            return numbered_table_rows
         ocr_rows = _extract_from_ocr(path, account_ref)
         if ocr_rows is not None:
             return ocr_rows

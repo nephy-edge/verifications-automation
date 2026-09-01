@@ -156,6 +156,92 @@ def test_ocr_failure_falls_back_to_placeholder_with_updated_reason(tmp_path):
     assert "OCR" in rows[0]["description"]
 
 
+def test_numbered_table_layout_tried_via_searchable_pdf_before_flat_text_ocr(tmp_path):
+    """`extract_pdf` should recover the numbered-table layout from a scan by
+    re-OCRing into a searchable PDF first — the flat-text OCR path
+    (`ocr_extract_text`) can never resolve this layout (it needs word
+    x-positions), so it must not even be reached when the searchable-PDF
+    path already found real rows."""
+    fake_pdf = tmp_path / "scan.pdf"
+    fake_pdf.write_bytes(b"%PDF-fake")
+    numbered_rows = [{"description": "collections:L1", "amount": 500.0, "direction": "in", "value_date": "2024-01-01"}]
+    with patch("phase1_ingestion_parsing.extract.extract_pdf_text", return_value=""), patch(
+        "phase1_ingestion_parsing.extract.ocr_to_searchable_pdf", return_value=b"%PDF-searchable"
+    ), patch("phase1_ingestion_parsing.extract._scan_numbered_table", return_value=numbered_rows), patch(
+        "phase1_ingestion_parsing.extract.detect_shape", return_value={}
+    ), patch("phase1_ingestion_parsing.extract.ocr_extract_text") as mock_flat_ocr:
+        rows = extract_pdf(fake_pdf, account_ref="acct")
+    mock_flat_ocr.assert_not_called()
+    assert len(rows) == 1
+    assert rows[0]["ocr"] is True
+    assert rows[0]["confidence"] <= 0.6
+    assert rows[0]["amount"] == 500.0
+
+
+def test_numbered_table_layout_not_found_falls_back_to_flat_text_ocr(tmp_path):
+    """When the searchable-PDF path can't identify the numbered-table header
+    (a different, flat-text layout), `extract_pdf` must still fall back to
+    the existing flat-text OCR path rather than giving up."""
+    fake_pdf = tmp_path / "scan.pdf"
+    fake_pdf.write_bytes(b"%PDF-fake")
+    with patch("phase1_ingestion_parsing.extract.extract_pdf_text", return_value=""), patch(
+        "phase1_ingestion_parsing.extract.ocr_to_searchable_pdf", return_value=b"%PDF-searchable"
+    ), patch("phase1_ingestion_parsing.extract._scan_numbered_table", return_value=None), patch(
+        "phase1_ingestion_parsing.extract.ocr_extract_text",
+        return_value="12/03/2024 SALARY PAYMENT 1,500.00",
+    ):
+        rows = extract_pdf(fake_pdf, account_ref="acct")
+    assert len(rows) == 1
+    assert rows[0]["amount"] == 1500.00
+
+
+def test_numbered_table_layout_via_ocr_on_a_real_synthetic_scan():
+    """End-to-end regression test for the fix landed 2026-09-01: OCR-ing the
+    repo's real Absa statement directly into flat text recovers 0 of its 15
+    numbered-table rows (proven earlier the same day), because that layout
+    needs each word's x-position to map tokens to columns and a flat string
+    doesn't carry it. Rendering the real PDF's pages to images (stripping
+    the text layer, to genuinely simulate a scan) and re-OCRing into a
+    *searchable* PDF instead should recover at least one real, correctly
+    parsed row — proof the coordinate mapper runs successfully against OCR
+    output, not just against a native text layer."""
+    from phase1_ingestion_parsing.ocr import tesseract_available
+
+    if not tesseract_available():
+        return
+    import pypdfium2 as pdfium
+
+    src = Path(__file__).resolve().parent.parent / "samples" / "statement_absa.pdf"
+    if not src.exists():
+        return
+
+    pdf = pdfium.PdfDocument(str(src))
+    try:
+        images = [pdf[i].render(scale=2).to_pil().convert("RGB") for i in range(len(pdf))]
+    finally:
+        pdf.close()
+
+    with tempfile.TemporaryDirectory() as d:
+        scan_path = Path(d) / "statement_absa_scan.pdf"
+        images[0].save(scan_path, save_all=True, append_images=images[1:])
+
+        from phase1_ingestion_parsing.extract import extract_pdf_text
+
+        assert extract_pdf_text(scan_path).strip() == ""  # confirms this is a genuine scan, no text layer
+
+        rows = extract_pdf(scan_path, account_ref="absa_scan")
+
+    assert rows, "expected the searchable-PDF path to recover at least one real transaction"
+    assert all(r.get("ocr") is True for r in rows)
+    # A specific known-correct row from the real statement (verified against
+    # the native-text-layer parse of the same file): date, amount, direction,
+    # and description all match — the OCR path recovers real data, not noise.
+    match = next((r for r in rows if r.get("value_date") == "2022-03-21" and r.get("amount") == 3.75), None)
+    assert match is not None
+    assert match["direction"] == "out"
+    assert "GTWORLD" in match["description"]
+
+
 def test_unmapped_text_layout_produces_a_flaggable_placeholder_row():
     # Real text, but nothing in it matches either known statement layout.
     unmapped_text = "Some Other Bank\nStatement for account 12345\nNo recognizable rows here."
@@ -426,6 +512,11 @@ if __name__ == "__main__":
         test_scanned_pdf_with_ocr_available_parses_via_existing_layouts(Path(d))
     with tempfile.TemporaryDirectory() as d:
         test_ocr_failure_falls_back_to_placeholder_with_updated_reason(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_numbered_table_layout_tried_via_searchable_pdf_before_flat_text_ocr(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_numbered_table_layout_not_found_falls_back_to_flat_text_ocr(Path(d))
+    test_numbered_table_layout_via_ocr_on_a_real_synthetic_scan()
     test_unmapped_text_layout_produces_a_flaggable_placeholder_row()
     test_recognized_layout_rows_do_not_need_spot_check()
     test_month_name_date_parsed_to_iso()

@@ -1,7 +1,8 @@
 # Deterministic engine — runtime + parsing. Kept minimal, deterministic-first.
 PyYAML>=6.0
 
-# PDF parsing / extraction (Phase 1)
+# PDF parsing / extraction (Phase 1). pypdf merges per-page searchable PDFs
+# produced by ocr.py's ocr_to_searchable_pdf().
 pypdf>=4.0
 pdfplumber>=0.11.0
 

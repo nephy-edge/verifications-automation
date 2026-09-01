@@ -15,10 +15,18 @@ Both `pytesseract` and `pypdfium2` are optional dependencies (like
 `tesseract` binary itself isn't on the machine, every function here degrades
 to "no text extracted" rather than raising, so the caller falls back to the
 existing confidence:0.0 placeholder exactly as it did before OCR existed.
+
+`ocr_to_searchable_pdf()` is a second OCR mode for one specific gap
+`ocr_extract_text()` can't close: the coordinate-based numbered-table layout
+(`extract.py`'s `_scan_numbered_table`) needs each word's position on the
+page, which a flat OCR string doesn't carry. It re-OCRs into a PDF with a
+positioned (invisible) text layer instead, so that layout's column-mapping
+logic can run against a scan the same way it runs against a real text layer.
 """
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 
@@ -37,6 +45,11 @@ try:
 except Exception:  # pragma: no cover - optional dep
     Image = None
     ImageEnhance = None
+
+try:
+    import pypdf
+except Exception:  # pragma: no cover - optional dep
+    pypdf = None
 
 # Common Windows install locations, checked when TESSERACT_CMD isn't set and
 # the binary isn't already on PATH (mirrors the ported tool's own fallback).
@@ -122,5 +135,50 @@ def ocr_extract_text(pdf_bytes: bytes) -> str:
             except Exception:
                 return ""  # tesseract present but failed to run (e.g. binary broken)
         return _fix_ocr_errors("\n".join(parts))
+    finally:
+        pdf.close()
+
+
+def ocr_to_searchable_pdf(pdf_bytes: bytes) -> bytes | None:
+    """OCR every page into a new PDF carrying an invisible, *positioned* text
+    layer (Tesseract's own PDF output mode), unlike `ocr_extract_text`'s flat
+    string which throws word coordinates away.
+
+    Exists for one reason: `extract.py`'s `_scan_numbered_table` (the
+    `# DATE NARRATION DEBIT CREDIT BALANCE` layout) maps tokens to columns by
+    each word's x-position on the page — information a flat OCR string can
+    never carry, so that layout has a real, measured 0% recovery rate from a
+    scan today. A searchable PDF gives `pdfplumber.extract_words()` real
+    bounding boxes to read again, the same as a genuine text layer would.
+
+    It does *not* help pdfplumber's ruling-line table detection
+    (`page.extract_tables()`) — that needs vector graphics, and this PDF's
+    visible content is still just the rendered page image, no lines. This is
+    for the coordinate-based layout parser specifically, not a general "make
+    the scan look like a native PDF" fix.
+
+    Returns None wherever OCR isn't usable, mirroring `ocr_extract_text`.
+    """
+    if not tesseract_available() or pypdf is None:
+        return None
+    try:
+        pdf = pdfium.PdfDocument(pdf_bytes)
+    except Exception:
+        return None
+    try:
+        writer = pypdf.PdfWriter()
+        for page_idx in range(len(pdf)):
+            bitmap = pdf[page_idx].render(scale=3)
+            image = _preprocess_image(bitmap.to_pil())
+            try:
+                page_pdf_bytes = pytesseract.image_to_pdf_or_hocr(image, config="--psm 3", extension="pdf")
+            except Exception:
+                return None  # tesseract present but failed to run
+            writer.append(pypdf.PdfReader(io.BytesIO(page_pdf_bytes)))
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        return buffer.getvalue()
+    except Exception:
+        return None
     finally:
         pdf.close()

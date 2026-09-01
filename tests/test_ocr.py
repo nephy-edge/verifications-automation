@@ -3,6 +3,7 @@
 posture `extract.py` relies on. Plain asserts, same style as test_extract.py.
 """
 
+import io
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from phase1_ingestion_parsing.ocr import (  # noqa: E402
     _fix_ocr_errors,
     _preprocess_image,
     ocr_extract_text,
+    ocr_to_searchable_pdf,
     tesseract_available,
 )
 
@@ -75,10 +77,60 @@ def test_preprocess_image_does_not_truncate_a_sparse_page():
         assert line.split(" ", 1)[0] in text  # each transaction's date survived
 
 
+def test_ocr_to_searchable_pdf_on_garbage_bytes_returns_none():
+    assert ocr_to_searchable_pdf(b"not a real pdf") is None
+
+
+def test_ocr_to_searchable_pdf_on_empty_bytes_returns_none():
+    assert ocr_to_searchable_pdf(b"") is None
+
+
+def test_ocr_to_searchable_pdf_recovers_word_positions_pdfplumber_can_read():
+    """Regression test for the fix landed 2026-09-01: `_scan_numbered_table`
+    needs each word's x-position to map tokens to columns, which
+    `ocr_extract_text`'s flat string throws away -- measured at 0% recovery
+    on a real scanned numbered-table statement. `ocr_to_searchable_pdf`
+    keeps positions by re-OCRing into a PDF with an invisible text layer;
+    this confirms pdfplumber can actually read words + coordinates back out
+    of what Tesseract writes, not just that some bytes came back."""
+    if not tesseract_available():
+        return
+    import pdfplumber
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (1200, 300), "white")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arial.ttf", 28)
+    except Exception:
+        font = ImageFont.load_default()
+    draw.text((30, 30), "1 12-JAN-2024 SALARY PAYMENT 1500.00 0.00 1500.00", fill="black", font=font)
+
+    buf = _image_to_pdf_bytes(img)
+    result = ocr_to_searchable_pdf(buf)
+    assert result is not None
+
+    with pdfplumber.open(io.BytesIO(result)) as pdf:
+        words = pdf.pages[0].extract_words()
+    assert words, "expected pdfplumber to read a positioned text layer back out"
+    assert all("x0" in w and "top" in w for w in words)
+    joined = " ".join(w["text"] for w in words).upper()
+    assert "SALARY" in joined
+
+
+def _image_to_pdf_bytes(image) -> bytes:
+    buf = io.BytesIO()
+    image.save(buf, format="PDF")
+    return buf.getvalue()
+
+
 if __name__ == "__main__":
     test_tesseract_available_never_raises()
     test_ocr_extract_text_on_garbage_bytes_returns_empty_string()
     test_ocr_extract_text_on_empty_bytes_returns_empty_string()
     test_fix_ocr_errors_normalizes_common_misreads()
     test_preprocess_image_does_not_truncate_a_sparse_page()
+    test_ocr_to_searchable_pdf_on_garbage_bytes_returns_none()
+    test_ocr_to_searchable_pdf_on_empty_bytes_returns_none()
+    test_ocr_to_searchable_pdf_recovers_word_positions_pdfplumber_can_read()
     print("ocr tests OK")
