@@ -6,7 +6,7 @@ and cross-synthesizes, never computes.
 """
 
 from phase3_anomaly_reporting.anomaly import detect_anomalies
-from phase3_anomaly_reporting.rank import rank_exceptions
+from phase3_anomaly_reporting.rank import forensic_route, rank_exceptions
 from phase3_anomaly_reporting.reporter import build_report
 
-__all__ = ["build_report", "detect_anomalies", "rank_exceptions"]
+__all__ = ["build_report", "detect_anomalies", "forensic_route", "rank_exceptions"]

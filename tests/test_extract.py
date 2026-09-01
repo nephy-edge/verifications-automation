@@ -7,14 +7,17 @@ fixture; `extract_pdf()` itself just wraps `extract_pdf_text` + this.
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from phase1_ingestion_parsing.extract import (  # noqa: E402
+    _stamp_currency,
     assess_confidence,
+    detect_shape,
     extract_pdf,
     extract_pdf_balance,
+    extract_pdf_table_rows,
     extract_statement_balance,
     parse_statement_text,
 )
@@ -286,6 +289,116 @@ def test_numbered_table_full_parse_of_real_absa_sample():
     assert extract_pdf_balance(path) == 2003.94
 
 
+def test_stamp_currency_fills_blank_row_currency_from_detected_shape():
+    """The per-line parsers never populate a row's own `currency` — only the
+    statement-level regex (`detect_shape`) does, from header/metadata text
+    that appears once per file, not per transaction line. FX normalization
+    (phase2/calculate.py) reads the row's `currency`, so it must be
+    propagated down or every PDF-sourced row would silently look base-
+    currency regardless of what the statement actually says."""
+    rows = [{"amount": 100.0, "currency": ""}, {"amount": 50.0, "currency": ""}]
+    _stamp_currency(rows, {"currency": "KES"})
+    assert all(r["currency"] == "KES" for r in rows)
+
+
+def test_stamp_currency_does_not_overwrite_an_already_set_row_currency():
+    rows = [{"amount": 100.0, "currency": "USD"}]
+    _stamp_currency(rows, {"currency": "KES"})
+    assert rows[0]["currency"] == "USD"
+
+
+def test_stamp_currency_no_op_when_shape_has_no_currency():
+    rows = [{"amount": 100.0, "currency": ""}]
+    _stamp_currency(rows, {})
+    assert rows[0]["currency"] == ""
+
+
+def test_numbered_table_full_parse_of_real_absa_sample_stamps_kes_currency():
+    """Same real-sample guard as the tie-out test above: the Absa statement's
+    own header text names KES, and every extracted row should carry it now
+    that `extract_pdf` stamps the statement-level currency onto each row."""
+    import pdfplumber
+
+    path = Path(__file__).resolve().parent.parent / "samples" / "statement_absa.pdf"
+    if pdfplumber is None or not path.exists():
+        return
+    rows = extract_pdf(path, account_ref="absa")
+    assert rows
+    assert all(r.get("currency") == "KES" for r in rows)
+
+
+def test_extract_pdf_table_rows_skips_a_summary_table_with_no_data_rows(tmp_path):
+    """Regression test for a real bug found 2026-09-01: a one-row account-
+    summary table (e.g. "Starting Balance $100 | Ending Balance $200") can
+    loosely satisfy the header keyword check too (it has "balance" in it),
+    and if picked first, every real transaction row that follows gets
+    force-mapped onto its wrong, unrelated columns. A candidate header must
+    have at least one data row beneath it before it's accepted."""
+    fake_pdf = tmp_path / "statement.pdf"
+    fake_pdf.write_bytes(b"%PDF-fake")
+
+    summary_table = [["Starting Balance $100.00", "Ending Balance $200.00"]]  # 1 row, no data -> must be skipped
+    real_table = [
+        ["DATE", "TRANSACTION CODE", "DESCRIPTION", "AMOUNT"],
+        ["2026-06-02", "TXN-001", "Coffee", "$5.00"],
+        ["2026-06-03", "TXN-002", "Groceries", "$40.00"],
+    ]
+
+    fake_page = MagicMock()
+    fake_page.extract_tables.return_value = [summary_table, real_table]
+    fake_pdf_obj = MagicMock()
+    fake_pdf_obj.pages = [fake_page]
+    fake_pdf_obj.__enter__.return_value = fake_pdf_obj
+    fake_pdf_obj.__exit__.return_value = False
+
+    with patch("phase1_ingestion_parsing.extract.pdfplumber.open", return_value=fake_pdf_obj):
+        rows, columns = extract_pdf_table_rows(fake_pdf, account_ref="acct")
+
+    assert columns == ["DATE", "TRANSACTION CODE", "DESCRIPTION", "AMOUNT"]
+    assert len(rows) == 2
+    assert rows[0]["TRANSACTION CODE"] == "TXN-001"
+    assert rows[0]["DATE"] == "2026-06-02"
+
+
+def test_extract_pdf_table_rows_drops_a_repeated_header_on_a_later_page(tmp_path):
+    fake_pdf = tmp_path / "statement.pdf"
+    fake_pdf.write_bytes(b"%PDF-fake")
+
+    page1_table = [
+        ["DATE", "DESCRIPTION", "AMOUNT"],
+        ["2026-06-02", "Coffee", "$5.00"],
+    ]
+    page2_table = [
+        ["DATE", "DESCRIPTION", "AMOUNT"],  # repeated header, not data
+        ["2026-06-03", "Groceries", "$40.00"],
+    ]
+    page1 = MagicMock()
+    page1.extract_tables.return_value = [page1_table]
+    page2 = MagicMock()
+    page2.extract_tables.return_value = [page2_table]
+    fake_pdf_obj = MagicMock()
+    fake_pdf_obj.pages = [page1, page2]
+    fake_pdf_obj.__enter__.return_value = fake_pdf_obj
+    fake_pdf_obj.__exit__.return_value = False
+
+    with patch("phase1_ingestion_parsing.extract.pdfplumber.open", return_value=fake_pdf_obj):
+        rows, columns = extract_pdf_table_rows(fake_pdf, account_ref="acct")
+
+    assert len(rows) == 2
+    assert [r["DESCRIPTION"] for r in rows] == ["Coffee", "Groceries"]
+
+
+def test_extract_pdf_table_rows_falls_back_to_canonical_when_no_real_table_found():
+    canonical_rows = [
+        {"value_date": "2026-06-02", "description": "Coffee", "amount": 5.0, "direction": "out", "currency": "USD"}
+    ]
+    with patch("phase1_ingestion_parsing.extract.extract_pdf", return_value=canonical_rows):
+        rows, columns = extract_pdf_table_rows("does-not-exist.pdf", account_ref="acct")
+
+    assert columns == ["Date", "Description", "Amount", "Direction", "Currency"]
+    assert rows == [{"Date": "2026-06-02", "Description": "Coffee", "Amount": 5.0, "Direction": "out", "Currency": "USD"}]
+
+
 def test_numbered_table_does_not_parse_monthly_summary_or_totals_lines():
     """The page-1 'DATE TOTAL DEBITS TOTAL CREDITS BALANCE' monthly summary and
     the 'Available balance ... Total credits' totals block must not be mistaken
@@ -321,5 +434,14 @@ if __name__ == "__main__":
     test_tie_out_pass_and_fail()
     test_failed_tie_out_drops_confidence_below_floor()
     test_numbered_table_full_parse_of_real_absa_sample()
+    test_stamp_currency_fills_blank_row_currency_from_detected_shape()
+    test_stamp_currency_does_not_overwrite_an_already_set_row_currency()
+    test_stamp_currency_no_op_when_shape_has_no_currency()
+    test_numbered_table_full_parse_of_real_absa_sample_stamps_kes_currency()
+    with tempfile.TemporaryDirectory() as d:
+        test_extract_pdf_table_rows_skips_a_summary_table_with_no_data_rows(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_extract_pdf_table_rows_drops_a_repeated_header_on_a_later_page(Path(d))
+    test_extract_pdf_table_rows_falls_back_to_canonical_when_no_real_table_found()
     test_numbered_table_does_not_parse_monthly_summary_or_totals_lines()
     print("extract tests OK")

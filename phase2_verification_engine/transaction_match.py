@@ -203,3 +203,83 @@ def build_match_report(match_result: dict[str, list[dict[str, Any]]]) -> pd.Data
             }
         )
     return pd.DataFrame(rows)
+
+
+_AMOUNT_CLEAN_RE = re.compile(r"[^0-9.\-]")
+
+
+def parse_amount(value: Any) -> float | None:
+    """Best-effort parse of a raw cell value into a float.
+
+    Tolerant of the shapes a statement's own amount column shows up in
+    before any canonical normalization: currency symbols and codes
+    ("$1,234.56", "KES 500"), thousands separators, and parenthesised
+    negatives ("(200.00)", the common accounting convention for a debit).
+    Returns None for blank/unparseable cells rather than raising, so one
+    bad cell doesn't abort a whole-column total.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value == value else None  # excludes NaN
+    text = str(value).strip()
+    if not text:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    if negative:
+        text = text[1:-1]
+    elif text.startswith("-"):
+        negative = True
+    cleaned = _AMOUNT_CLEAN_RE.sub("", text).lstrip("-")
+    if not cleaned or cleaned == ".":
+        return None
+    try:
+        amount = float(cleaned)
+    except ValueError:
+        return None
+    return -amount if negative else amount
+
+
+def sum_amount_column(records: list[dict[str, Any]], column: str) -> tuple[float, int, int]:
+    """Sum a raw column across records. Returns (total, parsed_count, skipped_count) —
+    the counts let a caller flag "3 of 25 rows couldn't be read as numbers"
+    rather than silently folding them into the total as zero."""
+    total = 0.0
+    parsed = 0
+    skipped = 0
+    for rec in records:
+        amount = parse_amount(rec.get(column))
+        if amount is None:
+            skipped += 1
+        else:
+            total += amount
+            parsed += 1
+    return total, parsed, skipped
+
+
+def build_generic_match_report(match_result: dict[str, list[dict[str, Any]]]) -> pd.DataFrame:
+    """Flatten a match result into one row per record, keeping every column
+    from both sides rather than the fixed description/amount pair
+    `build_match_report` assumes — for matching on raw, arbitrary columns
+    (e.g. a statement's own "Transaction Code") where there's no canonical
+    schema to fall back on. Reported columns are prefixed "Reported: ",
+    independent "Independent: ", so same-named columns on both sides don't
+    collide."""
+    rows: list[dict[str, Any]] = []
+    for m in match_result["matched"]:
+        row: dict[str, Any] = {
+            "Status": "Matched" if m["match_type"] == "exact" else "Partial match",
+            "Match key": m["match_key"],
+        }
+        row.update({f"Reported: {k}": v for k, v in m["reported"].items()})
+        row.update({f"Independent: {k}": v for k, v in m["independent"].items()})
+        rows.append(row)
+    for rec in match_result["unmatched_reported"]:
+        row = {"Status": "In reported only", "Match key": ""}
+        row.update({f"Reported: {k}": v for k, v in rec.items()})
+        rows.append(row)
+    for rec in match_result["unmatched_independent"]:
+        row = {"Status": "In independent only", "Match key": ""}
+        row.update({f"Independent: {k}": v for k, v in rec.items()})
+        rows.append(row)
+    return pd.DataFrame(rows)

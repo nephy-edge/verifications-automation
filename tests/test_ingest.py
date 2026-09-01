@@ -5,7 +5,30 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from phase1_ingestion_parsing.ingest import DIR_IN, DIR_OUT, normalize_loan_tape_row  # noqa: E402
+import pandas as pd  # noqa: E402
+
+from phase1_ingestion_parsing.ingest import DIR_IN, DIR_OUT, normalize_loan_tape_row, read_raw_table  # noqa: E402
+
+
+def test_read_raw_table_keeps_the_files_own_column_names(tmp_path):
+    """The Transaction Matching tab's column picker needs a file's *real*
+    columns (e.g. "Transaction Code"), not the canonical schema
+    `load_and_normalize` maps everything into — that schema doesn't have a
+    slot for a transaction-code column at all, it would just be dropped."""
+    path = tmp_path / "ledger.xlsx"
+    # A title row above the real header, same shape as a real bank export
+    # that broke the Transaction Matching tab before the column-picker fix.
+    pd.DataFrame(
+        [
+            ["Some Bank - Customer Ledger", None, None],
+            ["Date", "Transaction Code", "Amount"],
+            ["2026-06-02", "TXN-001", 100.0],
+        ]
+    ).to_excel(path, index=False, header=False)
+
+    df = read_raw_table(path)
+    assert list(df.columns) == ["Date", "Transaction Code", "Amount"]
+    assert df.iloc[0]["Transaction Code"] == "TXN-001"
 
 
 def test_paid_loan_emits_disbursement_and_collections():

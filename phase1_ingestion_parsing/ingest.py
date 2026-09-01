@@ -170,6 +170,14 @@ def _read_tabular(path: Path) -> pd.DataFrame:
     return _read_excel(path)
 
 
+def read_raw_table(path: Path) -> pd.DataFrame:
+    """Public entry point to `_read_tabular` for callers that want the file's
+    own real column names (e.g. "Transaction Code") rather than this
+    module's canonical schema — the Transaction Matching tab's column
+    picker, not the deterministic reconciliation pipeline."""
+    return _read_tabular(path)
+
+
 def _find_col(columns: Any, *needles: str) -> str | None:
     """First column whose lowercased name contains any of `needles`, in order."""
     lower_map = {str(c).strip().lower(): c for c in columns}

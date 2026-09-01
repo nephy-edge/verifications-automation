@@ -13,6 +13,8 @@ from typing import Any
 
 import yaml
 
+from phase0_foundations.fx import FXConfig
+
 
 @dataclass
 class Thresholds:
@@ -47,6 +49,7 @@ class LLMConfig:
 class Config:
     thresholds: Thresholds = field(default_factory=Thresholds)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    fx: FXConfig = field(default_factory=FXConfig)
     log_path: Path = Path("verifications.log.jsonl")
     out_dir: Path = Path("out")
 
@@ -56,6 +59,7 @@ class Config:
         cfg = cls(
             thresholds=Thresholds.from_dict(d.get("thresholds")),
             llm=LLMConfig.from_dict(d.get("llm")),
+            fx=FXConfig.from_dict(d.get("fx")),
         )
         logging_cfg = d.get("logging") or {}
         out_cfg = d.get("output") or {}

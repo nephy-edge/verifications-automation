@@ -34,7 +34,9 @@ from phase1_ingestion_parsing.assets import (  # noqa: E402
     load_expected_assets,
     load_registry_results,
 )
+from phase0_foundations.fx import FXConfig  # noqa: E402
 from phase1_ingestion_parsing.extract import extract_pdf  # noqa: E402
+from phase1_ingestion_parsing.fx_rates import FXFetchError, fetch_live_rates  # noqa: E402
 from phase1_ingestion_parsing.ingest import (  # noqa: E402
     SHEET_LEDGER,
     SHEET_TAPE,
@@ -61,6 +63,14 @@ def main() -> int:
     parser.add_argument("--assets", nargs="*", default=[], help="Reported assets register file(s) (plate/borrower/expected_owner)")
     parser.add_argument("--asset-checks", nargs="*", default=[], help="Registry check result file(s) (e.g. vehicle_plate_peru output)")
     parser.add_argument("--reported", default="{}", help='JSON of reported totals, e.g. {"collections":100}')
+    parser.add_argument(
+        "--live-fx", action="store_true",
+        help=(
+            "Fetch live FX rates (fawazahmed0/currency-api, free, no key) for any non-base "
+            "currency found in the input, falling back to config.yaml's static fx.rates table "
+            "on failure. Off by default so a CLI run stays reproducible given the same inputs."
+        ),
+    )
     parser.add_argument("--out", default="out")
     args = parser.parse_args()
 
@@ -86,6 +96,31 @@ def main() -> int:
 
         all_rows = tape_rows + ledger_rows + bank_rows
 
+        # SOP 1 FX normalization: only fetched when explicitly requested
+        # (--live-fx) so a plain CLI run stays reproducible given the same
+        # input files. See app/streamlit_app.py's `_run_pipeline` for the
+        # same logic where it's opt-out instead (an interactive UI can show
+        # the fetch result before anyone trusts the numbers).
+        found_currencies = {(r.get("currency") or "").strip().upper() for r in all_rows}
+        found_currencies.discard("")
+        found_currencies.discard(cfg.fx.base_currency)
+
+        effective_fx = cfg.fx
+        live_fx_status: str | None = None
+        if found_currencies and args.live_fx:
+            try:
+                live_rates, as_of = fetch_live_rates(cfg.fx.base_currency, found_currencies)
+                if live_rates:
+                    effective_fx = FXConfig(base_currency=cfg.fx.base_currency, rates={**cfg.fx.rates, **live_rates})
+                    live_fx_status = f"Live FX rates fetched for {', '.join(sorted(live_rates))} (as of {as_of})."
+                else:
+                    live_fx_status = (
+                        f"Live FX source had no rate for {', '.join(sorted(found_currencies))}; "
+                        "using config.yaml's static rates only."
+                    )
+            except FXFetchError as exc:
+                live_fx_status = f"{exc} Using config.yaml's static rates only."
+
         # Asset existence verification: independent of the transaction sources
         # above — a reported register of pledged assets vs. a third-party
         # registry's own check (e.g. vehicle_plate_peru's plate lookup).
@@ -104,11 +139,12 @@ def main() -> int:
             "asset_files": args.assets,
             "asset_check_files": args.asset_checks,
             "asset_coverage": asset_coverage,
+            "live_fx_status": live_fx_status,
             **coverage_stats(len(all_rows), len(all_rows)),
         }
 
         # Phase 2: deterministic aggregation + reconciliation.
-        aggregates = calculate_aggregates(all_rows)
+        aggregates = calculate_aggregates(all_rows, fx=effective_fx)
         run.aggregates = aggregates
 
         reported = json.loads(args.reported or "{}")
@@ -125,9 +161,11 @@ def main() -> int:
         # Report + log.
         log.append({"event": "run_completed", "run_id": run_id, "aggregates": aggregates,
                     "exception_count": len(exceptions)})
-        report_path = build_report(run, args.out, exceptions=exceptions)
+        report_path = build_report(run, args.out, exceptions=exceptions, thresholds=cfg.thresholds)
 
         print(f"Run {run_id} done.")
+        if live_fx_status:
+            print(f"FX: {live_fx_status}")
         print(f"Aggregates: {aggregates}")
         print(f"Exceptions: {len(exceptions)}")
         print(f"Report: {report_path}")

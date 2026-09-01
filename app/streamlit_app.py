@@ -33,6 +33,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from phase0_foundations.config import Config, load_config
+from phase0_foundations.fx import FXConfig, convert_to_base
 from phase0_foundations.log import RunLog
 from phase0_foundations.metrics import (
     coverage as coverage_stats,
@@ -55,8 +56,10 @@ from phase1_ingestion_parsing.extract import (
     detect_shape,
     extract_pdf,
     extract_pdf_balance,
+    extract_pdf_table_rows,
     extract_pdf_text,
 )
+from phase1_ingestion_parsing.fx_rates import FXFetchError, fetch_live_rates
 from phase1_ingestion_parsing.ingest import (
     SHEET_BANK,
     SHEET_LEDGER,
@@ -65,13 +68,18 @@ from phase1_ingestion_parsing.ingest import (
     extract_tabular_balance,
     load_and_normalize,
     normalize_loan_tape_row,
+    read_raw_table,
 )
 from phase2_verification_engine.assets import verify_asset_existence
 from phase2_verification_engine.calculate import calculate_aggregates
 from phase2_verification_engine.reconcile import reconcile
-from phase2_verification_engine.transaction_match import build_match_report, match_transactions
+from phase2_verification_engine.transaction_match import (
+    build_generic_match_report,
+    match_transactions,
+    sum_amount_column,
+)
 from phase3_anomaly_reporting.anomaly import detect_anomalies
-from phase3_anomaly_reporting.rank import rank_exceptions
+from phase3_anomaly_reporting.rank import forensic_route, rank_exceptions
 from phase3_anomaly_reporting.reporter import build_report
 from phase4_human_review import approval
 from phase5_feedback_hardening.harden import (
@@ -262,6 +270,7 @@ def _save_upload(uploaded_file, dest_dir: Path) -> Path:
 
 def _run_pipeline(
     tape_files, bank_files, ledger_files, mobile_files, cash_map_files=(), tape_records=None,
+    use_live_fx=True,
 ) -> tuple[VerificationRun, Path]:
     run_id = uuid.uuid4().hex[:12]
     run_dir = OUT_ROOT / run_id
@@ -314,11 +323,55 @@ def _run_pipeline(
             "shape": {},
         }
 
+    def _statement_currency(s: dict[str, Any]) -> str:
+        """Best-effort currency for one statement's closing balance: the PDF
+        text-detected currency (`shape`) first, else the first row that
+        carries one (tabular sources' own `currency` column)."""
+        shape_currency = (s.get("shape") or {}).get("currency")
+        if shape_currency:
+            return shape_currency
+        for r in s.get("rows", []):
+            if r.get("currency"):
+                return r["currency"]
+        return ""
+
     bank_statements = [_load_statement(p, SHEET_BANK) for p in bank_paths]
     mobile_statements = [_load_statement(p, SHEET_MOBILE) for p in mobile_paths]
     bank_rows: list[dict] = [r for s in bank_statements for r in s["rows"]]
-    bank_balances: list[float] = [s["balance"] for s in bank_statements if s["balance"] is not None]
+    bank_balance_pairs: list[tuple[float, str]] = [
+        (s["balance"], _statement_currency(s)) for s in bank_statements if s["balance"] is not None
+    ]
+    bank_balances: list[float] = [b for b, _ in bank_balance_pairs]
     mobile_rows: list[dict] = [r for s in mobile_statements for r in s["rows"]]
+
+    # SOP 1 (bi-weekly cash tracking) FX normalization: try a live rate for
+    # every non-blank, non-base currency actually present in this run's data
+    # before falling back to config.yaml's static `fx.rates` table. Live
+    # rates win on overlap (more current); a currency neither source has is
+    # still left unconverted and surfaced via `unmapped_currencies` below —
+    # never guessed. Skips the network call entirely for a single-currency
+    # (or currency-blank) run.
+    found_currencies = {
+        (r.get("currency") or "").strip().upper() for r in (tape_rows + ledger_rows + bank_rows + mobile_rows)
+    } | {c.strip().upper() for _, c in bank_balance_pairs if c}
+    found_currencies.discard("")
+    found_currencies.discard(CFG.fx.base_currency)
+
+    effective_fx = CFG.fx
+    live_fx_status: str | None = None
+    if found_currencies and use_live_fx:
+        try:
+            live_rates, as_of = fetch_live_rates(CFG.fx.base_currency, found_currencies)
+            if live_rates:
+                effective_fx = FXConfig(base_currency=CFG.fx.base_currency, rates={**CFG.fx.rates, **live_rates})
+                live_fx_status = f"Live FX rates fetched for {', '.join(sorted(live_rates))} (as of {as_of})."
+            else:
+                live_fx_status = (
+                    f"Live FX source had no rate for {', '.join(sorted(found_currencies))}; "
+                    "using config.yaml's static rates only."
+                )
+        except FXFetchError as exc:
+            live_fx_status = f"{exc} Using config.yaml's static rates only."
 
     # A cash map (A2) names accounts by role (and sometimes by bank), never
     # by account number — so a statement can only be matched to a candidate
@@ -335,7 +388,7 @@ def _run_pipeline(
 
     statement_summaries: list[dict[str, Any]] = []
     for s in bank_statements + mobile_statements:
-        agg = calculate_aggregates(s["rows"])
+        agg = calculate_aggregates(s["rows"], fx=effective_fx)
         candidates = (
             match_accounts(s["text"], s["filename"], cash_map_accounts) if cash_map_accounts else []
         )
@@ -357,9 +410,17 @@ def _run_pipeline(
     # which is a point-in-time balance, not a sum of transaction amounts: it
     # comes from the statement's own closing balance (extracted separately),
     # summed across accounts if more than one statement was uploaded.
-    tape_agg = calculate_aggregates(tape_rows)
-    ledger_agg = calculate_aggregates(ledger_rows)
-    indep_agg = calculate_aggregates(bank_rows + mobile_rows)
+    tape_agg = calculate_aggregates(tape_rows, fx=effective_fx)
+    ledger_agg = calculate_aggregates(ledger_rows, fx=effective_fx)
+    indep_agg = calculate_aggregates(bank_rows + mobile_rows, fx=effective_fx)
+
+    balance_unmapped: set[str] = set()
+
+    def _converted_balance(amount: float, currency: str) -> float:
+        converted, unmapped = convert_to_base(amount, currency, effective_fx)
+        if unmapped:
+            balance_unmapped.add(unmapped)
+        return converted
 
     reported = {
         "collections": tape_agg["collections"],
@@ -369,8 +430,16 @@ def _run_pipeline(
     calculated = {
         "collections": indep_agg["collections"],
         "disbursements": indep_agg["disbursements"],
-        "cash_total": sum(bank_balances) if bank_balances else 0.0,
+        "cash_total": (
+            sum(_converted_balance(b, c) for b, c in bank_balance_pairs) if bank_balance_pairs else 0.0
+        ),
     }
+    unmapped_currencies = sorted(
+        set(tape_agg.get("unmapped_currencies", []))
+        | set(ledger_agg.get("unmapped_currencies", []))
+        | set(indep_agg.get("unmapped_currencies", []))
+        | balance_unmapped
+    )
 
     # B3: rows below the PDF-confidence floor need a human spot-check rather
     # than being trusted silently — flag them (an unmapped-layout PDF now
@@ -422,6 +491,8 @@ def _run_pipeline(
             "skipped_reconciliation": skipped_recon,
             "cash_map_accounts": cash_map_accounts,
             "statement_summaries": statement_summaries,
+            "unmapped_currencies": unmapped_currencies,
+            "live_fx_status": live_fx_status,
         },
         aggregates={
             "reported_collections": reported["collections"],
@@ -436,7 +507,7 @@ def _run_pipeline(
         started_at=_now(),
         finished_at=_now(),
     )
-    build_report(run, run_dir, exceptions=exceptions)
+    build_report(run, run_dir, exceptions=exceptions, thresholds=CFG.thresholds)
     RUN_LOG.append(
         {
             "event": "run_completed",
@@ -473,7 +544,7 @@ def _load_run(run_id: str) -> tuple[VerificationRun, Path]:
 
 
 def _persist_run(run: VerificationRun, run_dir: Path) -> None:
-    build_report(run, run_dir, exceptions=run.exceptions)
+    build_report(run, run_dir, exceptions=run.exceptions, thresholds=CFG.thresholds)
 
 
 def _signed_off_ids() -> set[str]:
@@ -679,6 +750,15 @@ with tab_run:
         st.dataframe(pd.DataFrame(loaded_tape_records), width="stretch", height=400)
 
     st.subheader("2. Run")
+    use_live_fx = st.checkbox(
+        "Fetch live FX rates for multi-currency amounts (fawazahmed0/currency-api — free, no API key)",
+        value=True,
+        key="use_live_fx",
+        help=(
+            "Only called when a non-base currency is actually present in the uploaded data. "
+            "Falls back to config.yaml's static `fx.rates` table if unreachable — never guesses a rate."
+        ),
+    )
     can_run = bool(
         tape_files or bank_files or ledger_files or mobile_files or loaded_tape_records
     )
@@ -691,6 +771,7 @@ with tab_run:
                 mobile_files or [],
                 cash_map_files or [],
                 tape_records=loaded_tape_records,
+                use_live_fx=use_live_fx,
             )
         st.session_state["active_run"] = run
         st.session_state["active_run_dir"] = run_dir
@@ -762,6 +843,18 @@ with tab_run:
                 _fmt(a.get("calculated_cash_total", 0), has_independent_balance),
             )
         st.caption(f"{a.get('transaction_count', 0):,} canonical records ingested across all sources.")
+
+        live_fx_status = inputs.get("live_fx_status")
+        if live_fx_status:
+            st.caption(f"FX: {live_fx_status}")
+
+        unmapped_currencies = inputs.get("unmapped_currencies") or []
+        if unmapped_currencies:
+            st.warning(
+                f"No FX rate configured for {', '.join(unmapped_currencies)} — these amounts were "
+                f"summed unconverted against a {CFG.fx.base_currency} baseline. Add a rate under "
+                "`fx.rates` in config.yaml before trusting totals that mix these currencies."
+            )
 
         cash_map_files = inputs.get("cash_map_files") or []
         if cash_map_files:
@@ -863,6 +956,23 @@ with tab_run:
                 ]
             )
             st.dataframe(df, width='stretch', hide_index=True)
+
+            forensic = forensic_route(run.exceptions, CFG.thresholds)
+            if forensic:
+                st.error(
+                    f"**{len(forensic)} exception(s) routed to forensic review** "
+                    f"(severity >= {CFG.thresholds.anomaly_score_high:.2f} — A3 step 5/D1):"
+                )
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"Severity": e.severity, "Kind": e.kind, "Description": e.description}
+                            for e in forensic
+                        ]
+                    ),
+                    width='stretch',
+                    hide_index=True,
+                )
         else:
             st.info("No exceptions flagged.")
 
@@ -1279,38 +1389,156 @@ with tab_match:
     st.subheader("Detailed transaction matching (optional, best-effort)")
     st.caption(
         "reconcile.py (the Run tab) answers 'do the totals line up' — this answers 'which "
-        "specific transaction has no counterpart on the other side.' It matches on each "
-        "record's own description text, exact first then partial (substring) — useful when a "
-        "narration echoes something from the reported side (e.g. a loan id), but most real "
-        "statement pairs share little text verbatim. A low match rate here isn't itself an "
-        "anomaly — it's a separate, on-demand report, not part of the main exception queue."
+        "specific transaction has no counterpart on the other side.' Preview shows each file's "
+        "own real columns as extracted; pick whichever column actually carries a reference "
+        "shared by both sides (a transaction code matches far more reliably than a free-text "
+        "description). A low match rate here isn't itself an anomaly — it's a separate, "
+        "on-demand report, not part of the main exception queue."
     )
     mc1, mc2 = st.columns(2)
     with mc1:
         match_reported_file = st.file_uploader(
-            "Reported source (loan tape / ledger)",
+            "Reported source (loan tape / ledger, or another bank/mobile export)",
             type=["csv", "xlsx", "xls"],
             key="match_reported_up",
         )
     with mc2:
         match_independent_file = st.file_uploader(
-            "Independent source (bank / mobile statement)",
+            "Independent source (bank / mobile statement, or PDF)",
             type=["csv", "xlsx", "xls", "pdf"],
             key="match_independent_up",
         )
 
-    if st.button("Run matching", disabled=not (match_reported_file and match_independent_file)):
+    reported_records: list[dict] = []
+    independent_records: list[dict] = []
+    reported_cols: list[str] = []
+    independent_cols: list[str] = []
+
+    if match_reported_file and match_independent_file:
         match_dir = OUT_ROOT / "_match_uploads"
         reported_path = _save_upload(match_reported_file, match_dir)
         independent_path = _save_upload(match_independent_file, match_dir)
-        reported_rows = load_and_normalize([reported_path], sheet=SHEET_TAPE)
-        independent_rows = (
-            extract_pdf(independent_path, account_ref=independent_path.stem)
-            if independent_path.suffix.lower() == ".pdf"
-            else load_and_normalize([independent_path], sheet=SHEET_BANK)
+
+        # Raw, real column names on purpose — not the canonical tape/bank
+        # schema the Run tab uses. That schema discards a statement's own
+        # reference columns (e.g. "Transaction Code"), which is often the
+        # only reliable match key two independent exports actually share.
+        reported_df = read_raw_table(reported_path)
+        reported_records = reported_df.to_dict("records")
+        reported_cols = [str(c) for c in reported_df.columns]
+
+        if independent_path.suffix.lower() == ".pdf":
+            independent_records, independent_cols = extract_pdf_table_rows(
+                independent_path, account_ref=independent_path.stem
+            )
+        else:
+            independent_df = read_raw_table(independent_path)
+            independent_records = independent_df.to_dict("records")
+            independent_cols = [str(c) for c in independent_df.columns]
+
+        st.subheader("Preview — how each file was divided into columns")
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            st.caption(f"Reported: {len(reported_records)} row(s) — {', '.join(reported_cols) or 'no columns found'}")
+            st.dataframe(reported_df.head(), width="stretch")
+        with pc2:
+            st.caption(
+                f"Independent: {len(independent_records)} row(s) — {', '.join(independent_cols) or 'no columns found'}"
+            )
+            st.dataframe(pd.DataFrame(independent_records).head(), width="stretch")
+
+        if not reported_records:
+            st.warning(f"'{match_reported_file.name}' produced 0 rows — check the preview above.")
+        if not independent_records:
+            st.warning(
+                f"'{match_independent_file.name}' produced 0 rows — no table structure was found in it "
+                "(a flat-text or scanned layout falls back to fewer, fixed columns; check the preview above)."
+            )
+
+        st.subheader("Column totals — do the amounts match?")
+        st.caption(
+            "Sums the whole column on each side, independent of whether individual rows match — "
+            "a quick check before drilling into row-level matching below."
         )
-        result = match_transactions(reported_rows, independent_rows)
-        st.session_state["match_result"] = result
+        ac1, ac2 = st.columns(2)
+
+        def _guess_amount_col(cols: list[str]) -> str:
+            for c in cols:
+                if "amount" in c.lower():
+                    return c
+            return "(none)"
+
+        with ac1:
+            reported_amount_col = st.selectbox(
+                "Reported amount column",
+                options=["(none)"] + reported_cols,
+                index=(["(none)"] + reported_cols).index(_guess_amount_col(reported_cols)),
+                key="match_reported_amount_col",
+            )
+        with ac2:
+            independent_amount_col = st.selectbox(
+                "Independent amount column",
+                options=["(none)"] + independent_cols,
+                index=(["(none)"] + independent_cols).index(_guess_amount_col(independent_cols)),
+                key="match_independent_amount_col",
+            )
+
+        if reported_amount_col != "(none)" and independent_amount_col != "(none)":
+            r_total, r_parsed, r_skipped = sum_amount_column(reported_records, reported_amount_col)
+            i_total, i_parsed, i_skipped = sum_amount_column(independent_records, independent_amount_col)
+            diff = r_total - i_total
+            tolerance = max(abs(r_total), abs(i_total)) * 0.001  # 0.1% — floating-point/rounding noise only
+
+            t1, t2, t3 = st.columns(3)
+            t1.metric(f"Reported total ({reported_amount_col})", f"{r_total:,.2f}")
+            t2.metric(f"Independent total ({independent_amount_col})", f"{i_total:,.2f}")
+            t3.metric("Difference", f"{diff:,.2f}")
+
+            if abs(diff) <= tolerance:
+                st.success("Totals match.")
+            else:
+                st.warning(f"Totals don't match — reported is {diff:,.2f} more than independent.")
+
+            if r_skipped or i_skipped:
+                st.caption(
+                    f"Skipped as non-numeric: {r_skipped} reported row(s) (parsed {r_parsed}), "
+                    f"{i_skipped} independent row(s) (parsed {i_parsed})."
+                )
+
+        st.subheader("Select columns to match")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            reported_col = st.selectbox(
+                "Reported column to match on", options=reported_cols or ["(none)"], key="match_reported_col"
+            )
+        with cc2:
+            independent_col = st.selectbox(
+                "Independent column to match on", options=independent_cols or ["(none)"], key="match_independent_col"
+            )
+
+        with st.expander("Matching options", expanded=False):
+            oc1, oc2, oc3, oc4 = st.columns(4)
+            with oc1:
+                case_sensitive = st.checkbox("Case sensitive", value=False, key="match_case_sensitive")
+            with oc2:
+                ignore_spaces = st.checkbox("Ignore spaces", value=False, key="match_ignore_spaces")
+            with oc3:
+                ignore_special_chars = st.checkbox("Ignore special characters", value=False, key="match_ignore_special")
+            with oc4:
+                partial_match = st.checkbox("Allow partial (substring) match", value=True, key="match_partial")
+
+        if st.button("Run matching", disabled=not (reported_records and independent_records)):
+            result = match_transactions(
+                reported_records,
+                independent_records,
+                reported_field=reported_col,
+                independent_field=independent_col,
+                partial_match=partial_match,
+                case_sensitive=case_sensitive,
+                ignore_spaces=ignore_spaces,
+                ignore_special_chars=ignore_special_chars,
+            )
+            st.session_state["match_result"] = result
 
     result = st.session_state.get("match_result")
     if result:
@@ -1319,7 +1547,7 @@ with tab_match:
         m2.metric("In reported only", len(result["unmatched_reported"]))
         m3.metric("In independent only", len(result["unmatched_independent"]))
 
-        report_df = build_match_report(result)
+        report_df = build_generic_match_report(result)
         st.dataframe(report_df, width="stretch", hide_index=True)
 
         buffer = io.BytesIO()
@@ -1332,4 +1560,4 @@ with tab_match:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     else:
-        st.info("Upload both sources and run matching to see results.")
+        st.info("Upload both sources to see a preview, pick match columns, and run matching.")

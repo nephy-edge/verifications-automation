@@ -71,11 +71,21 @@ def tesseract_available() -> bool:
 
 
 def _preprocess_image(image: "Image.Image") -> "Image.Image":
-    """Grayscale + contrast/sharpness boost — measurably improves Tesseract
-    accuracy on the low-contrast, small-font scans bank statements tend to be."""
+    """Grayscale + contrast boost.
+
+    A `Sharpness(2.0)` step used to run here too (ported from the original
+    tool this was adapted from), on the assumption it "measurably improves"
+    accuracy. Tested directly against real OCR output (not assumed): on a
+    dense real bank statement it consistently lost ~20% of the text Tesseract
+    otherwise recovered on 2 of 3 pages, and on a page with a large blank
+    region (a short statement, or a near-empty final page — not a rare case)
+    it silently truncated output to a single line, dropping every
+    transaction after the first with no error or warning. Grayscale +
+    contrast alone tracks within ~1-3% of unprocessed-image OCR on the real
+    sample and never reproduced the truncation, so the sharpen step was
+    removed rather than tuned."""
     image = image.convert("L")
     image = ImageEnhance.Contrast(image).enhance(1.5)
-    image = ImageEnhance.Sharpness(image).enhance(2.0)
     return image
 
 

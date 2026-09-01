@@ -11,10 +11,12 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 
+from phase0_foundations.config import Thresholds
 from phase0_foundations.models import ExceptionItem, VerificationRun
+from phase3_anomaly_reporting.rank import forensic_route
 
 
-def _markdown(run: VerificationRun) -> str:
+def _markdown(run: VerificationRun, thresholds: Thresholds | None = None) -> str:
     lines: list[str] = []
     lines.append(f"# Verification report - run {run.id}")
     lines.append("")
@@ -44,6 +46,18 @@ def _markdown(run: VerificationRun) -> str:
             )
         lines.append("")
 
+    unmapped = run.aggregates.get("unmapped_currencies") or inputs.get("unmapped_currencies")
+    if unmapped:
+        base = run.aggregates.get("fx_base_currency", "the base currency")
+        lines.append("## Currency")
+        lines.append("")
+        lines.append(
+            f"No FX rate configured for: {', '.join(unmapped)} — these amounts were summed "
+            f"unconverted against a {base} baseline. Add a rate under `fx.rates` in "
+            "config.yaml before trusting totals that mix these currencies."
+        )
+        lines.append("")
+
     lines.append(f"## Exceptions ({len(run.exceptions)})")
     lines.append("")
     if not run.exceptions:
@@ -54,6 +68,19 @@ def _markdown(run: VerificationRun) -> str:
             line += f" (evidence: {', '.join(e.evidence)})"
         lines.append(line)
     lines.append("")
+
+    if thresholds is not None:
+        forensic = forensic_route(run.exceptions, thresholds)
+        lines.append(
+            f"## Forensic review queue (severity >= {thresholds.anomaly_score_high:.2f})"
+        )
+        lines.append("")
+        if not forensic:
+            lines.append("No exceptions at or above the forensic-review threshold.")
+        for e in forensic:
+            lines.append(f"- [{e.kind}] {e.description}")
+        lines.append("")
+
     lines.append("## Human review")
     lines.append("")
     pending = [e for e in run.exceptions if e.status == "pending"]
@@ -65,8 +92,15 @@ def build_report(
     run: VerificationRun,
     out_dir: str | Path,
     exceptions: Sequence[ExceptionItem] | None = None,
+    thresholds: Thresholds | None = None,
 ) -> Path:
-    """Write the JSON + Markdown report for a run. Returns path to the JSON report."""
+    """Write the JSON + Markdown report for a run. Returns path to the JSON report.
+
+    ``thresholds`` is optional (older call sites keep working without a
+    forensic-review section), but passing it surfaces the A3/D1 forensic
+    route (severity >= B3's ``anomaly_score_high``) in both report formats
+    instead of leaving it computed-but-unsurfaced.
+    """
     run.exceptions = list(exceptions) if exceptions is not None else run.exceptions
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -94,10 +128,17 @@ def build_report(
             for e in run.exceptions
         ],
     }
+    if thresholds is not None:
+        forensic = forensic_route(run.exceptions, thresholds)
+        report["forensic_review"] = {
+            "threshold": thresholds.anomaly_score_high,
+            "count": len(forensic),
+            "exception_ids": [e.id for e in forensic],
+        }
 
     json_path = out / f"run_{run.id}.json"
     json_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
 
     md_path = out / f"run_{run.id}.md"
-    md_path.write_text(_markdown(run), encoding="utf-8")
+    md_path.write_text(_markdown(run, thresholds), encoding="utf-8")
     return json_path

@@ -54,7 +54,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from phase1_ingestion_parsing.ingest import DIR_IN, DIR_OUT
+from phase1_ingestion_parsing.ingest import DIR_IN, DIR_OUT, _looks_like_header
 from phase1_ingestion_parsing.ocr import ocr_extract_text
 
 try:
@@ -688,6 +688,20 @@ def _tie_out(rows: list[dict[str, Any]], shape: dict[str, Any]) -> bool | None:
     return None
 
 
+def _stamp_currency(rows: list[dict[str, Any]], shape: dict[str, Any]) -> list[dict[str, Any]]:
+    """Fill each row's blank `currency` from the statement-level, regex-detected
+    one (`shape["currency"]`, from `detect_shape`) so FX normalization
+    (phase2/calculate.py) has something to key off. The per-line parsers never
+    populate a row's own `currency` — the statement declares it once, in its
+    header/metadata text, not on every transaction line."""
+    currency = shape.get("currency") or ""
+    if currency:
+        for r in rows:
+            if not r.get("currency"):
+                r["currency"] = currency
+    return rows
+
+
 def _apply_layout_confidence(rows: list[dict[str, Any]], text: str, shape: dict[str, Any]) -> None:
     """Adjust confidence from the balance tie-out, where the layout supports it.
 
@@ -731,7 +745,9 @@ def _extract_from_ocr(path: str | Path, account_ref: str) -> list[dict[str, Any]
     ocr_rows = parse_statement_text(ocr_text, account_ref=account_ref)
     if not ocr_rows:
         return None
-    _apply_layout_confidence(ocr_rows, ocr_text, detect_shape(ocr_text))
+    ocr_shape = detect_shape(ocr_text)
+    _apply_layout_confidence(ocr_rows, ocr_text, ocr_shape)
+    _stamp_currency(ocr_rows, ocr_shape)
     # OCR introduces its own error class beyond layout tie-out (misread
     # digits, dropped lines) — never let it read as fully trustworthy even
     # when the tie-out happens to pass.
@@ -772,18 +788,92 @@ def extract_pdf(path: str | Path, account_ref: str = "") -> list[dict[str, Any]]
         table_rows = _scan_numbered_table(path, account_ref)
         if table_rows:
             _apply_layout_confidence(table_rows, text, shape)
-            return table_rows
+            return _stamp_currency(table_rows, shape)
 
     rows = parse_statement_text(text, account_ref=account_ref)
     if rows:
         _apply_layout_confidence(rows, text, shape)
-        return rows
+        return _stamp_currency(rows, shape)
     # Text layer exists, but no line matched a known layout: an unmapped
     # format, not an empty statement. Flag it rather than silently returning
     # nothing.
     return _unmapped_layout_placeholder(
         account_ref, "PDF has a text layer but no line matched a known statement layout - manual spot-check required"
     )
+
+
+def _canonical_as_table_rows(path: str | Path, account_ref: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Fallback for `extract_pdf_table_rows` when no real embedded table is
+    found: reuse the validated canonical parser rather than writing a second
+    raw one, relabeled to generic display columns."""
+    canonical = extract_pdf(path, account_ref=account_ref)
+    columns = ["Date", "Description", "Amount", "Direction", "Currency"]
+    rows = [
+        {
+            "Date": r.get("value_date", ""),
+            "Description": r.get("description", ""),
+            "Amount": r.get("amount", ""),
+            "Direction": r.get("direction", ""),
+            "Currency": r.get("currency", ""),
+        }
+        for r in canonical
+    ]
+    return rows, columns
+
+
+def extract_pdf_table_rows(path: str | Path, account_ref: str = "") -> tuple[list[dict[str, Any]], list[str]]:
+    """Raw, real-column-name extraction for the Transaction Matching tab's
+    column picker — deliberately *not* the canonical schema `extract_pdf()`
+    produces. Matching on a statement's own reference key (e.g. "Transaction
+    Code") needs that exact column, which the canonical parser discards in
+    favor of a fixed `description`/`amount`/`direction` shape.
+
+    Tries pdfplumber's own table detection first (real ruling-line tables;
+    the header row is identified with the same keyword heuristic
+    `ingest.py` uses for an Excel export's title-row offset), concatenating
+    tables across pages that share that header. Falls back to `extract_pdf`'s
+    validated canonical rows — relabeled to generic display columns — when no
+    real table is found (a flat-text layout, or OCR'd text), reusing proven
+    parsing rather than a second raw one for that case.
+    """
+    if pdfplumber is None or not Path(path).exists():
+        return _canonical_as_table_rows(path, account_ref)
+
+    header: list[str] | None = None
+    rows: list[dict[str, Any]] = []
+    with pdfplumber.open(str(path)) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables() or []:
+                if not table or not table[0]:
+                    continue
+                first_row = table[0]
+                if header is None:
+                    # A summary/metadata table (account totals, address block)
+                    # can loosely satisfy the keyword check too (e.g. a
+                    # "Starting Balance" cell matching on "balance") but never
+                    # has data rows beneath its own header-like line — require
+                    # at least one to rule those out before locking this in
+                    # as *the* transaction table.
+                    if not _looks_like_header(first_row) or len(table) < 2:
+                        continue
+                    header = [str(c or "").strip() or f"Column {i + 1}" for i, c in enumerate(first_row)]
+                    body = table[1:]
+                else:
+                    # A repeated header on a later page (common on multi-page
+                    # statements) is dropped; anything else is data.
+                    body = table[1:] if _looks_like_header(first_row) else table
+                for raw_row in body:
+                    if not raw_row or not any(raw_row):
+                        continue
+                    row: dict[str, Any] = {}
+                    for i, value in enumerate(raw_row):
+                        col = header[i] if i < len(header) else f"Column {i + 1}"
+                        row[col] = value.strip() if isinstance(value, str) else value
+                    rows.append(row)
+
+    if header and rows:
+        return rows, header
+    return _canonical_as_table_rows(path, account_ref)
 
 
 def assess_confidence(rows: list[dict[str, Any]], floor: float) -> list[dict[str, Any]]:
