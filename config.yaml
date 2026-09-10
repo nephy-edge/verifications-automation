@@ -10,6 +10,452 @@ thresholds:
   pdf_confidence_floor: 0.85        # <85% -> manual spot-check
   transaction_volume_multiple: 10   # frequency anomaly (10x normal)
   round_dollar_materiality_multiple: 3   # round amount must also be >3x median to flag
+  gateway_fee_max_pct: 0.05         # SOP-2: reported-vs-net gap this small or less is a plausible gateway fee, not a raw variance
+  sequence_jump_multiple: 10        # an amount this many times an account's own trailing average flags (not the portfolio median)
+  sequence_jump_min_window: 3       # need >= this many prior same-account rows before judging a "pattern"
+  off_hours_start_hour: 22          # off-hours window start (24h) -- only judged when a row's date carries a time component
+  off_hours_end_hour: 5             # off-hours window end (24h)
+  micro_split_min_count: 3          # >= this many same-account, same-day, similar-size transactions flags possible structuring
+  micro_split_amount_tolerance_pct: 0.15   # "similar size" = within this fraction of each other
+  micro_split_materiality_multiple: 3      # combined total must also be >3x median to flag
+
+# Per-loan tape column names (dbt_source.<borrower>_source_loans_staging via
+# the Redshift dropdown -- NOT the uploaded-file path, which expects the
+# `default` names already). Real column names vary a lot by borrower/lender
+# data source: a survey of all 46 borrower tables on 2026-09-03
+# (docs/loan_tape_column_survey.md) found only 1 ("advance") matches
+# `default` exactly on every money/date field. Add an entry under
+# `overrides.<borrower>` to fix a borrower without touching code --
+# `phase1_ingestion_parsing/ingest.py`'s normalize_loan_tape_row() and
+# app/streamlit_app.py's _loan_tape_summary() both resolve through this.
+# A field with no real equivalent for a borrower is left unmapped (same as
+# today: silently 0 in money sums / omitted from the derived event) --
+# see the survey doc for the full per-borrower gap list and candidates.
+loan_tape_columns:
+  default:
+    loan_id: loan_id
+    begin_date: begin_date
+    principal_amount: principal_amount
+    total_loan_amount: total_loan_amount
+    principal_outstanding: principal_outstanding
+    interest_outstanding: interest_outstanding
+    fee_outstanding: fee_outstanding       # singular -- matches real data (leasy et al.); ingest.py
+    penalty_outstanding: penalty_outstanding   # used to hardcode the plural form, silently zeroing both (fixed 2026-09-03)
+    closure_date: closure_date
+    company_due_date: company_due_date
+    currency: currency
+    status: status
+    country: country
+    days_past_due: days_past_due
+  # Unambiguous renames only (same field, different spelling/formatting) --
+  # confirmed by an exact match once underscores are stripped, nothing
+  # guessed. See the survey doc for borrowers that need a business call
+  # instead (multiple plausible candidates, or no equivalent column at all).
+  overrides:
+    # Full pass (2026-09-08) against every column of every borrower table
+    # (docs/loan_tape_column_survey.md "Full column list per borrower"),
+    # not just the field-by-field candidate lists from the original survey.
+    # Only 1:1, non-ambiguous matches are applied here. Two fields are never
+    # pointed at the same source column (would double-count in aggregation
+    # math) -- where that tradeoff existed, only the more literal field got
+    # the mapping and the other stays unmapped rather than guessed.
+    advance:
+      # Real columns are plural ("fees_outstanding"/"penalties_outstanding"),
+      # unlike most other borrowers -- the 2026-09-03 singular default fix
+      # (see file header) was correct for leasy et al. but broke advance.
+      fee_outstanding: fees_outstanding
+      penalty_outstanding: penalties_outstanding
+      # country: no country column, only `branch` (a different concept) --
+      # left unmapped rather than silently relabeling branch as country.
+    amartha:
+      days_past_due: dpd
+      # principal_amount / principal_outstanding: every amartha* table
+      # carries BOTH a "_lendable" and a "_loan" variant (e.g.
+      # principal_amount_lendable vs principal_amount_loan) -- which one is
+      # "the" principal is a real business call (Lendable's own exposure vs
+      # the full underlying loan), not something to guess. Pending decision.
+    amartha_full:
+      days_past_due: dpd
+    amartha_full_portfolio:
+      days_past_due: dpd
+    amartha_secured:
+      days_past_due: dpd
+    autocheck__ci:
+      principal_outstanding: principal_out
+      interest_outstanding: interest_out
+      fee_outstanding: fees_out
+      penalty_outstanding: penalty_out
+    autocheck__ug:
+      principal_outstanding: principal_out
+      interest_outstanding: interest_out
+      fee_outstanding: fees_out
+      penalty_outstanding: penalty_out
+    credismart:
+      loan_id: unique_loan_identifier
+      begin_date: loan_disbursement_date
+      principal_amount: principal
+      total_loan_amount: loan_amount
+      principal_outstanding: principal_still_outstanding
+      interest_outstanding: interest_still_outstanding
+      fee_outstanding: other_fees_and_charges_still_outstanding
+      company_due_date: loan_due_date
+      status: loan_status
+      country: country_code
+      # penalty_outstanding: no separate column -- likely folded into
+      # other_fees_and_charges_still_outstanding already used for fees;
+      # left unmapped rather than double-count it.
+    dlight:
+      # Pay-as-you-go solar financing, not an amortizing loan -- no
+      # principal/interest/fee/penalty-outstanding concept in this table.
+      loan_id: contractid
+      begin_date: contractregistrationdate_dt
+      total_loan_amount: contract_totalprice
+      closure_date: end_date
+      currency: currency_type
+      status: baseunit_contractstatus
+    exitus:
+      principal_amount: principal
+      closure_date: end_date
+      currency: currency_type
+      status: loan_status
+    first_circle:
+      begin_date: disbursement_date
+      principal_amount: loan_amount
+    first_digital_finance_corporation:
+      # Same plural fees/penalties exception as `advance`.
+      fee_outstanding: fees_outstanding
+      penalty_outstanding: penalties_outstanding
+      begin_date: disbursed_date
+      principal_amount: principal
+      closure_date: closed_date
+      company_due_date: first_due_date
+      # `loan_status` (text) is NULL on every row checked (0/200 live sample) --
+      # `loan_status_id` is fully populated but is a numeric code (e.g. 300,
+      # 600) with no legend in this table. Mapped anyway: a coded value a
+      # reviewer can look up beats a permanently blank tile, but this should
+      # be confirmed with FDFC/whoever owns the code list.
+      status: loan_status_id
+    khazna:
+      principal_amount: priciple_amount   # source column is itself a typo (missing "n")
+    koinworks:
+      begin_date: disbursed_date
+      principal_outstanding: principal_remaining
+      interest_outstanding: interest_remaining
+      penalty_outstanding: late_remaining
+      closure_date: cleared_date
+      # loan_id: `id` (surrogate key?) vs `loan_code` (business id) -- ambiguous, pending business call.
+      # principal_amount: only `funding_amount` exists (platform funding, not clearly loan principal) -- left unmapped.
+      # fee_outstanding: `total_commission_fee` is commission, not a fee owed by the borrower -- left unmapped.
+    leasy:
+      currency: currency_type
+    lendmn:
+      principal_amount: principal
+      closure_date: payoff_date
+      currency: currency_type
+    lendmn_micro:
+      principal_amount: principal
+      closure_date: payoff_date
+      currency: currency_type
+    lendmn_revolving:
+      principal_amount: principal
+      closure_date: payoff_date
+      currency: currency_type
+    lhoopa:
+      # Real-estate acquisition pipeline, not an amortizing loan -- no
+      # interest/fee/penalty-outstanding concept in this table.
+      loan_id: property_id
+      begin_date: property_purchase_date
+      principal_amount: property_purchase_amount
+      # status: `property_status` vs `construction_status` -- two distinct status concepts, ambiguous which is "the" status. Pending business call.
+    metafin:
+      begin_date: emi_begin_date   # matches redshift-api's LOAN_TAPE_DATE_COLUMN_OVERRIDES for this borrower
+      closure_date: emi_end_date
+      status: loan_status
+    mkopa:
+      loan_id: loanid
+      begin_date: loanstartdate
+      closure_date: loanenddate
+      # principal_amount/total_loan_amount/principal_outstanding/interest_outstanding/
+      # fee_outstanding/penalty_outstanding: this table has NO monetary columns at
+      # all (pay-as-you-go product) -- genuinely $0 in the summary, not a mapping gap.
+    moladin:
+      begin_date: start_date
+      principal_amount: amount
+      principal_outstanding: principal_remaining
+      closure_date: end_date
+      status: loan_status
+      # loan_id: `active_loan_id` vs `loan_submission_id` -- ambiguous, pending business call.
+    moladin_property:
+      begin_date: start_date
+      # total_loan_amount: the only amount column bundles principal+interest+origination
+      # fee together (no clean principal-only figure exists) -- mapped to "total" since
+      # that's the more honest label for a bundled figure; principal_amount left unmapped.
+      total_loan_amount: amount__principal___interest___origination_fee_
+      principal_outstanding: principal_remaining
+      closure_date: end_date
+    mottu:
+      # Vehicle-rental product, not an amortizing loan.
+      loan_id: contractid
+      begin_date: begindate
+      total_loan_amount: rentalprice
+      closure_date: enddate
+      company_due_date: duedate
+      status: contractsituation
+    mufin:
+      loan_id: loan_number
+      begin_date: loan_date
+      principal_amount: loan_amount
+      # principal_outstanding / interest_outstanding / days_past_due: real columns exist
+      # (`principal_outstanding_as_on_december_31_2025` etc.) but are hard-coded to a
+      # single snapshot date -- this looks like a one-off year-end extract rather than a
+      # rolling loan tape. Left unmapped: wiring a dated column name would silently break
+      # (or silently go stale) the next time mufin's source rolls to a new period.
+    payjoy:
+      loan_id: loansourceid
+      begin_date: origination_date
+      principal_amount: financeamount
+      status: financestatus
+    payjoy_full:
+      loan_id: loansourceid
+      begin_date: origination_date
+      principal_amount: financeamount
+      status: financestatus
+    payjoy_secured:
+      loan_id: loansourceid
+      begin_date: origination_date
+      principal_amount: financeamount
+      status: financestatus
+    payjoy_ecuador:
+      begin_date: date
+      principal_amount: principal_of_loan
+      total_loan_amount: size_of_loan
+      company_due_date: last_expected_payment_due_date
+      status: current_loan_status
+    payjoy_sa:
+      begin_date: date
+      principal_amount: principal_of_loan
+      total_loan_amount: size_of_loan
+      company_due_date: last_expected_payment_due_date
+      status: current_loan_status
+    samunnati:
+      loan_id: accountnumber
+      begin_date: disbursementdate
+      principal_amount: total_disbursed_amount
+      principal_outstanding: principaloutstanding
+      interest_outstanding: totalinterestdue
+      company_due_date: maturitydate
+      status: accountstatus
+      days_past_due: dpd_days
+    sary:
+      loan_id: loanid
+      begin_date: start_date
+      principal_amount: invoice_amount
+      principal_outstanding: principalbalance
+      company_due_date: due_date
+      status: loanstatus
+      days_past_due: dayspastdue
+      # interest_outstanding / penalty_outstanding: candidates `moratetaxincl` /
+      # `totalmargintaxincl` use unclear local terminology ("morate" may mean late/penalty
+      # interest) -- guessing which is which risks misstating a real figure. Pending business call.
+    shara:
+      loan_id: id
+      principal_amount: principal
+      closure_date: payoff_date
+      currency: currency_code
+    solar_panda:
+      loan_id: sale_id
+      begin_date: installed_date
+      principal_amount: price
+      closure_date: end_date
+    sugmya_finance:
+      principal_amount: principal
+      currency: currency_type
+      days_past_due: pardays   # "PAR days" (portfolio-at-risk days) = this table's DPD equivalent
+    techcoop:
+      principal_amount: principal
+      closure_date: end_date
+    validus_id:
+      begin_date: disbursement_date
+      total_loan_amount: total_loan
+      principal_outstanding: os   # standard finance abbreviation for "outstanding balance"
+      company_due_date: maturity_date
+      status: repayment_status
+      days_past_due: dpd
+      # principal_amount: `total_loan` is ambiguous (may already include interest) -- left unmapped.
+      # interest_outstanding: `actual_interest_amount` is ambiguous (total vs remaining-outstanding) -- pending business call.
+    validus_id_full:
+      begin_date: disbursement_date
+      total_loan_amount: total_loan
+      principal_outstanding: os
+      company_due_date: maturity_date
+      status: repayment_status
+      days_past_due: dpd
+    validus_id_lendable:
+      begin_date: disbursement_date
+      principal_amount: loan_amount
+      principal_outstanding: os
+      company_due_date: maturity_date
+      status: repayment_status
+      days_past_due: dpd
+      # interest_outstanding: `interest_amount` is ambiguous (total vs remaining-outstanding) -- pending business call.
+    validus_id_secured:
+      begin_date: disbursement_date
+      principal_amount: loan_amount
+      principal_outstanding: os
+      company_due_date: maturity_date
+      status: repayment_status
+      days_past_due: dpd
+    watu_africa:
+      loan_id: external_loan_id
+      principal_amount: principal
+      currency: currency_type
+      status: loan_status
+    # advance, f88, khazna, leasy, mkopa, prestamype, r5, solvento already
+    # match (or now match, with the overrides above) the default names on
+    # every money/date field with no further action needed.
+
+  # Borrowers whose money columns use a live negative-sign accounting
+  # convention -- confirmed 2026-09-09 by sampling real rows (not assumed
+  # from a sibling table): lendmn/lendmn_revolving's `principal` and
+  # autocheck__ci/ug's principal_out/interest_out/fees_out/penalty_out are
+  # negative on effectively every row. abs() is applied for these borrowers
+  # instead of the default floor-at-0, which would otherwise silently zero
+  # out real debt rather than just fix the sign. lendmn_micro is
+  # deliberately excluded -- sampled normally signed, unlike its siblings.
+  negative_sign_borrowers:
+    - lendmn
+    - lendmn_revolving
+    - autocheck__ci
+    - autocheck__ug
+
+# Change-detection watcher (SOP 1 / Option A): polls the Redshift Query API
+# for each borrower's loan tape and re-runs the verification pipeline when a
+# tool detects the tape has changed. Runs headless, writes a working paper +
+# audit log per change. See cash_watcher.py. Data-driven so poll cadence,
+# target borrowers and the cut-off guard are config-only.
+sop1:
+  watcher:
+    enabled: true                  # master switch; set true to let the watcher run
+    interval_seconds: 600          # poll cadence (default 10 min)
+    state_file: out/cash_watcher_state.json
+    tape_fetch_limit: 0                # rows per borrower per poll; 0 = fetch the full tape
+    run_on_change: true            # re-run the full pipeline when a change is detected
+    # Target borrowers to watch. Empty list = watch every borrower the API
+    # exposes (from /borrowers). Only genuine change moves a borrower forward.
+    # Scoped to leasy for the scheduled runs (all 46 borrowers would be too
+    # heavy for a 10-minute cron).
+    borrowers: [leasy]
+    # Cut-off guard: if the tape's latest begin_date is *after* this date
+    # (YYYY-MM-DD) when a change is detected, treat it as a post-cut-off
+    # update. "hard_stop" refuses to run (flags) vs "backdate" re-runs but
+    # marks the run as post-cut-off in the audit log. Leave empty to disable.
+    cut_off_date: ""
+    cut_off_mode: "backdate"       # "hard_stop" | "backdate"
+    # SOP-1 Step 4 ("Reconciliation & Cut-Off Matching") literally specifies
+    # "Flag discrepancies > 0.01%" -- 100x tighter than the general
+    # cash_balance_variance (1%, thresholds.cash_balance_variance above) used
+    # by every other reconciliation in the app. Scoped to this watcher only
+    # (not the shared threshold) so the Run tab / CLI aren't suddenly flagging
+    # ordinary FX/rounding noise across every other borrower and entry point.
+    cash_discrepancy_pct: 0.0001   # 0.01%
+    # Reported totals the pipeline reconciles against. Leave empty to derive
+    # from the tape itself (same as the Streamlit dropdown path).
+    reported: {}
+    # Report email delivery: after every change-triggered run, the working
+    # paper (.md + .json) is emailed to `to_addrs` via the Gmail API (OAuth,
+    # gmail.send scope) — no SMTP app password needed, so it works on corporate
+    # Google Workspace accounts where the admin has disabled app passwords. The
+    # disk write remains the audit trail; email is additional delivery. One-time
+    # setup: `python scripts/google_oauth_setup_gmail.py` (grants gmail.send,
+    # token saved to GOOGLE_OAUTH_GMAIL_TOKEN_JSON in .env). Keep enabled:false
+    # until a real authenticated send is verified (repo rule: no external
+    # integration goes live on config alone).
+    email:
+      enabled: true
+      gmail_token_env: "GOOGLE_OAUTH_GMAIL_TOKEN_JSON"
+      from_addr: "nephy@lendable.io"      # the Google account that sends
+      to_addrs: ["nephy@lendable.io"]     # recipient email address(es)
+      subject_prefix: "[Verifications] "
+    # SOP 1 statement drop-folder: read bank/wallet statements humans place in a
+    # Google Drive folder, feed them into reconciliation as the independent side,
+    # and retain the raw files as the audit trail. Requires a `drive.readonly`
+    # OAuth token (run `python scripts/google_oauth_setup_inbox.py` once). Without
+    # the token the watcher degrades to tape-only (reconciliation is surfaced as
+    # "NOT VERIFIED") instead of crashing. `inbox_folder` is a Drive folder id or
+    # name; `folder_by_borrower` overrides per borrower.
+    #
+    # NOTE: this folder is for STATEMENTS only. The loan-tape "Download as Google
+    # Sheet" export uses the separate DRIVE_FOLDER_ID env var (.env) and is
+    # unchanged here.
+    bank_statements:
+      enabled: true
+      inbox_folder: "1_ReH5RpdCr0vXfuKMj7KzjOlFjwOo31F"
+      # Each borrower reads statements from its OWN Drive subfolder (created
+      # under the main folder), so a statement dropped into <borrower>/ is
+      # reconciled against that borrower's tape. Ids resolved live from Drive
+      # on 2026-09-09; the local skeleton lives at
+      # C:\Users\NephyNdwiga\Downloads\projects\Verifications\sf test.
+      folder_by_borrower:
+        advance: "1UzR9Zp-tkxuWQUAk6-xUYjMYWiRpSklG"
+        amartha: "1zOaLIcJM6XILOYlB01NOkoQb9YkxgwC_"
+        amartha2: "1o_Jl2H_dlBkvTK4owkKL_0g7nbnZ5pmF"
+        amartha_full: "1Yj8MlwUw4CgEli8ZxFSbqbxiuqHKBHv-"
+        amartha_full_portfolio: "1MMj8caUdfG94pPucwx2Uu1wbRppvrseK"
+        amartha_secured: "1cuRy-3lj6KJGz3KWybJHEu_4FYqQ8g0j"
+        autocheck__ci: "1HbtecmW3QnN1WpH93jToaJGbfPIpaGiB"
+        autocheck__ug: "1lcOvviEtp_n612OAApDxcvZTih_ogpsL"
+        credismart: "1LjpqaSIDw389BRw2tTIc4eHJ2zQk3MqL"
+        dlight: "1SXevkUhl4lwUSzJ-MsCw7kfGh-xH_2o0"
+        exitus: "1vmat_Gg8hFCugAGLfnvdLxT3uLLORCrp"
+        f88: "19p8PhD1LnjIm4L4DDxguTmZm2xafj7BW"
+        first_circle: "1HJ_fptBl4ISsgxljcffWnSNVjbIGpC7F"
+        first_digital_finance_corporation: "1qGfPnUTDoMv9R4agFmnwLtCpEzlTx16L"
+        khazna: "1xwWCnWWZ5mHWfAbRTGNud72J2h2tvJ-k"
+        koinworks: "1b0lIvcRAYmYvNUNqqo-46jG9UuEtZGqq"
+        leasy: "1ck-AX_01AOZNIwpB-vFjCEaWz7KDZYwU"
+        lendmn: "1HRAI3Im4D5bSTj4FSvx9ASuey4JBjvos"
+        lendmn_micro: "1VlmSOeOz3K_g7K7VKi4DQiXuoM9IJgT_"
+        lendmn_revolving: "1CqXuJodTV3CPu-W8slaPtqJlFzrddw9F"
+        lhoopa: "1DHKH95Fjm-wQ9CAq7sqlmX183RwZFnWg"
+        metafin: "1d-6xTuoKRf3wU_IxuWOecAURIx15HM5E"
+        mkopa: "1QJar8Jle4hAW_I-2-nrr3i_zGJLL36rJ"
+        moladin: "1FM9dVMzGTe-dRFr4EdguAazSPdkwMAyQ"
+        moladin_property: "1pzNurYn9ORlMDR4SO9EEzNqAWv1NsCE6"
+        mottu: "1wLib9jCveEI81JblU96RzT5y6kbES1xD"
+        mufin: "1X2vZZvvxQLrb2t-8xRTPzcFfp79wyIML"
+        payjoy: "1zaTQ3kdDZcjjZ9AMKXBmU9Yla-Tfc_A1"
+        payjoy_ecuador: "1gJQhzHDZ_wMy3owCpOqLAY02MyCEfed4"
+        payjoy_full: "1OQgcVhfjD0lA9rewKiimrrsf4l5OeuB5"
+        payjoy_sa: "1_-cYk8eAejZXvatAIN1jR24jsVbk3vRp"
+        payjoy_secured: "1n-q6Ab_KoDhCB-OTkej0jlJIaCd6fk9o"
+        prestamype: "1cz3_PJnKjgM2YRFYmxlBYCYHZiIYoM5c"
+        r5: "1K9CHRL6lq_cNUqy9piPyKf05UymKsyQn"
+        samunnati: "1A0OdLp5roZqXqQlwKmO_cvEZ6o6ccQFq"
+        sary: "1oxmyYep9228vGg9TP90JnbiFTnq4ZFO6"
+        shara: "1YJ8Gy0W5B0MZdpre70hZhyV3g6QNqhek"
+        solar_panda: "1cg0Jb9Y55yoEhziNIUmBHjWeAE0Vty5O"
+        solvento: "1XoGAf22ZUDurdkKaOmXCH4V3hcxYkfSB"
+        sugmya_finance: "1NL03WVhPb-Kvfo6IgsEjq9hCYK2LPm-T"
+        techcoop: "19Ls3GBp3SbaGy9UKfvOFrcpSHYeSltWL"
+        validus_id: "1EDNupDNUOW3wZ7lz0xgkl4YEHhqUzV_E"
+        validus_id_full: "197CN21r6dHli-DTqXZ9uqBK8NQvQ70V1"
+        validus_id_lendable: "1luo9j_fNlnXrZVC_dHvPNAphS-6iLjYa"
+        validus_id_secured: "1IXpZwfSV2E66C6j0Q2YCzlSAZAtj4uCj"
+        watu_africa: "1Oijj1kZsYW9alG4XOyqUZ2wdlFBaJvTW"
+
+fx:
+  base_currency: USD
+  rates: {}   # {CCY: units of base_currency per 1 unit of CCY}, e.g. {"KES": 0.0067}.
+              # Live rate lookup (fawazahmed0/currency-api, free, no key) is the DEFAULT
+              # in both the Streamlit app and the CLI runner: for every non-base currency
+              # present in a run, a live rate is fetched and merged over this table
+              # (live wins on overlap). This static table is the offline/fallback source
+              # used when live lookup is disabled (CLI --no-live-fx) or unreachable, and
+              # is the only source when the network call is skipped for a single-currency
+              # run. Never fabricate a plausible-looking rate here (same discipline as
+              # vehicle_verify.py's confirmed-only country contracts). A currency present
+              # on a row but missing from both sources is left unconverted and surfaced
+              # as `unmapped_currencies` in the aggregates.
 
 fx:
   base_currency: USD
@@ -25,8 +471,50 @@ llm:
   parse_temperature: 0.3
   anomaly_temperature: 0.5
   max_tokens: 4000
-  provider: ""                      # e.g. "openai" | "anthropic" (leave empty for rules-only)
-  model: ""
+  provider: "deepinfra"              # "openai" | "anthropic" | "deepinfra" (leave empty for rules-only, no outbound LLM calls)
+  model: "deepseek-ai/DeepSeek-V4-Flash-0731"   # empty -> provider default (see phase0_foundations/llm_client.py _DEFAULT_MODEL)
+  deepinfra_base_url: ""            # empty -> "https://api.deepinfra.com/v1/openai" (DeepInfra's confirmed
+                                     # OpenAI-compatible base per docs.deepinfra.com/quickstart; the "/openai"
+                                     # segment is required and re-added if missing). Override only to point at
+                                     # a proxy in front of DeepInfra.
+  # provider/model currently power the "Ask (AI)" tab's NL querying
+  # (phase4_human_review/query.py, Output 8). API key comes from the
+  # provider's own env var (OPENAI_API_KEY / ANTHROPIC_API_KEY /
+  # DEEPINFRA_API_KEY), never here. "deepinfra" hosts DeepSeek (and other
+  # open) models behind an OpenAI-compatible API — see deepinfra.com/deepseek
+  # for other model ids.
+
+# Downstream services the app talks to. URL/key-name are data-driven so infra
+# moves (host/port/key renames) never require touching Python code.
+services:
+  redshift:
+    api_url: "http://127.0.0.1:8001"   # redshift-api sibling; trailing slash optional
+    api_key_env: "REDSHIFT_API_KEY"     # env var name that holds the API key
+
+# Static web assets referenced by the UI (CDN URLs). Stored as data so a font /
+# CDN change is config-only and never a code edit.
+assets:
+  fonts_url: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+  fonts_preconnect: "https://fonts.googleapis.com"
+  fonts_gstatic: "https://fonts.gstatic.com"
+
+# Vehicle-registry provider (Verifik). Base URL / confirmed endpoints are
+# externalized here so provider or account changes are config-only.
+vehicle_registry:
+  provider: verifik
+  base_url: "https://api.verifik.co"
+  base_url_env: "VERIFIK_BASE_URL"     # optional env override of base_url
+  token_env: "VERIFIK_TOKEN"           # env var name that holds the bearer token
+  timeout_seconds: 15
+  param_rename:
+    document_type: documentType
+    document_number: documentNumber
+  confirmed_paths:
+    PE: { path: "vehiculo/placa", extra: [] }
+    CO: { path: "runt/vehicle-by-plate-simplified", extra: ["document_type", "document_number"] }
+    CL: { path: "vehicle", extra: [] }
+    AR: { path: "vehicle", extra: [] }
+    BR: { path: "vehicle", extra: [] }
 
 logging:
   path: verifications.log.jsonl

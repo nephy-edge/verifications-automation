@@ -75,6 +75,22 @@ def test_extra_inputs_only_declared_where_needed():
     assert COUNTRY_CONFIG["PE"].extra_inputs == ()
 
 
+def test_missing_countries_added_unconfirmed():
+    # Bolivia, Costa Rica, Paraguay, USA are configured (in the dropdown + mock)
+    # but must NOT be live-whitelisted until a real plate returns a 200.
+    for code in ("BO", "CR", "PY", "US"):
+        assert code in COUNTRY_CONFIG, f"{code} should be configured"
+        assert COUNTRY_CONFIG[code].primary_endpoint
+        from phase1_ingestion_parsing.vehicle_verify import VerifikClient
+
+        assert code not in VerifikClient()._confirmed_paths()
+        try:
+            VerifikClient()._call(COUNTRY_CONFIG[code], "ABC123", {})
+            raise AssertionError(f"live _call for {code} should refuse (unconfirmed)")
+        except NotImplementedError:
+            pass  # expected until confirmed with a real 200
+
+
 # --------------------------------------------------------------- bucketing
 
 

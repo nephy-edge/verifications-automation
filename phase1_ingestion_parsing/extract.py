@@ -556,7 +556,15 @@ _BANK_NAMES = [
     "cooperative bank", "stanbic", "standard chartered", "bbva", "interbank",
     "bancolombia", "baz", "ncba", "mono", "withmono", "safaricom", "mtn",
 ]
-_CURRENCY_RE = re.compile(r"\b(KES|NGN|USD|PEN|EUR|GBP|UGX|TZS|RWF|ZMW|MXN|COP|BRL|GHS|XOF|ZAR)\b")
+_CURRENCY_RE = re.compile(
+    r"\b(KES|NGN|USD|PEN|EUR|GBP|UGX|TZS|RWF|ZMW|MXN|COP|BRL|GHS|XOF|ZAR|SOLES|DOLARES)\b",
+    re.IGNORECASE,
+)
+# Spanish bank-statement currency labels map onto the ISO codes above — e.g.
+# Peruvian "MONEDA: SOLES" means PEN, "DOLARES" means USD. Without this, a
+# real Peru statement (BBVA "SOLES") would carry a blank currency and its
+# amounts would be summed as if already in the base currency.
+_CURRENCY_ALIASES = {"soles": "PEN", "dolares": "USD"}
 # `account no.` and the number often sit on different lines ("Account no. Bank"
 # then "0131883461 Absa Bank"), so the gap is any run of non-digits.
 _ACCOUNT_NO_RE = re.compile(r"account(?: no\.?| number)?[^\d]{0,24}(\d{6,14})", re.IGNORECASE)
@@ -617,7 +625,7 @@ def detect_shape(text: str) -> dict[str, Any]:
             break
     cur = _CURRENCY_RE.search(text)
     if cur:
-        shape["currency"] = cur.group(1)
+        shape["currency"] = _CURRENCY_ALIASES.get(cur.group(1).lower(), cur.group(1).upper())
     acct = _ACCOUNT_NO_RE.search(text)
     if acct:
         shape["account_no"] = acct.group(1)

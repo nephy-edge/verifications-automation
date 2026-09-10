@@ -31,9 +31,10 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 from typing import Any, Protocol
+
+from phase0_foundations.config import Config, VehicleRegistryConfig, load_config
 
 # Canonical column set every country's response is mapped onto. `plate` is the
 # lookup key; the rest are the attributes surfaced to the user.
@@ -49,8 +50,24 @@ CANONICAL_FIELDS = [
 ]
 
 # Country codes the section understands. `code` is the UI-facing selector
-# value; `name` the human label.
-_COUNTRY_ORDER = ["PE", "MX", "CO", "CL", "AR", "BR", "EC"]
+# value; `name` the human label. Order controls the dropdown. BO/CR/PY/US are
+# countries Verifik documents vehicle endpoints for but this codebase has not
+# yet confirmed against a real live response (see each CountryConfig): they
+# show in the selector but the live client refuses them until confirmed.
+_COUNTRY_ORDER = ["PE", "MX", "CO", "CL", "AR", "BR", "EC", "BO", "CR", "PY", "US"]
+
+
+def _registry_cfg() -> VehicleRegistryConfig | None:
+    """Load the vehicle_registry section from config.yaml (None if unavailable).
+
+    Read lazily on first use so the module stays importable/tests stay green
+    whether or not a `config.yaml` is on disk; env overrides still take
+    precedence over whatever this returns.
+    """
+    try:
+        return load_config().vehicle_registry
+    except FileNotFoundError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -227,6 +244,87 @@ COUNTRY_CONFIG: dict[str, CountryConfig] = {
                 },
             ),
         ),
+        (
+            "BO",
+            CountryConfig(
+                code="BO",
+                name="Bolivia",
+                # UNCONFIRMED: Verifik documents GET /v2/bo/vehicle?plate=...
+                # (Bolivia - Vehicle Information) and v2/bo/vehicle-soat. No
+                # real live response has been observed here, so this field_map
+                # is a best-effort guess consistent with the other South
+                # American "vehicle" endpoints (plate/brand/model/year/color).
+                # VerifikClient._call refuses this country until a real 200.
+                primary_endpoint="vehicle",
+                field_map={
+                    "plate": "plate",
+                    "brand": "brand",
+                    "model": "model",
+                    "year": "year",
+                    "color": "color",
+                },
+                extra_endpoints=("vehicle-soat",),
+            ),
+        ),
+        (
+            "CR",
+            CountryConfig(
+                code="CR",
+                name="Costa Rica",
+                # UNCONFIRMED: Verifik documents GET /v2/cr/vehicle?plate=...
+                # (Costa Rica - Vehicle Information). No real live response
+                # observed here; best-effort field_map from the generic
+                # endpoint skeleton. VerifikClient._call refuses until a real
+                # 200 is observed.
+                primary_endpoint="vehicle",
+                field_map={
+                    "plate": "plate",
+                    "brand": "brand",
+                    "model": "model",
+                    "year": "year",
+                    "color": "color",
+                },
+            ),
+        ),
+        (
+            "PY",
+            CountryConfig(
+                code="PY",
+                name="Paraguay",
+                # UNCONFIRMED: Verifik documents GET /v2/py/vehicle?plate=...
+                # (Paraguay - Vehicle Information). No real live response
+                # observed here; best-effort field_map. VerifikClient._call
+                # refuses until a real 200 is observed.
+                primary_endpoint="vehicle",
+                field_map={
+                    "plate": "plate",
+                    "brand": "brand",
+                    "model": "model",
+                    "year": "year",
+                },
+            ),
+        ),
+        (
+            "US",
+            CountryConfig(
+                code="US",
+                name="United States",
+                # UNCONFIRMED: Verifik documents GET /v2/usa/vehicle?plate=...
+                # and v2/usa/vehicle-by-vin. US registries return VIN (a field
+                # this codebase already surfaces), plus make/model/year. No real
+                # live response observed here — best-effort field_map.
+                # VerifikClient._call refuses until a real 200 is observed.
+                primary_endpoint="vehicle",
+                field_map={
+                    "plate": "plate",
+                    "make": "brand",
+                    "model": "model",
+                    "year": "year",
+                    "vin": "vin",
+                    "color": "color",
+                },
+            ),
+        ),
     ]
 }
 
@@ -398,6 +496,33 @@ class MockVehicleClient:
             "signature": {"dateTime": "August 1, 2022 5:23 PM", "message": "Certified by Verifik.co"},
         },
         "EC": {"data": {"plate": "{PLATE}", "model": "Accent 1.6", "year": "2016", "status": "ASIGNADO"}},
+        # BO/CR/PY/US below are best-effort guesses for country coverage added
+        # while no real plate is available — their success shape is UNCONFIRMED
+        # (see each CountryConfig). The mock still lets the flatten/field-map
+        # and Match bucketing be exercised for these codes.
+        "BO": {
+            "data": {"plate": "{PLATE}", "brand": "Toyota", "model": "Hilux", "year": "2019", "color": "Blanco"},
+            "signature": {"dateTime": "August 1, 2022 5:23 PM", "message": "Certified by Verifik.co"},
+        },
+        "CR": {
+            "data": {"plate": "{PLATE}", "brand": "Hyundai", "model": "Tucson", "year": "2020", "color": "Gris"},
+            "signature": {"dateTime": "August 1, 2022 5:23 PM", "message": "Certified by Verifik.co"},
+        },
+        "PY": {
+            "data": {"plate": "{PLATE}", "brand": "Chevrolet", "model": "Onix", "year": "2021"},
+            "signature": {"dateTime": "August 1, 2022 5:23 PM", "message": "Certified by Verifik.co"},
+        },
+        "US": {
+            "data": {
+                "plate": "{PLATE}",
+                "make": "Ford",
+                "model": "F-150",
+                "year": "2022",
+                "vin": "1FTFW1E53NFA12345",
+                "color": "Black",
+            },
+            "signature": {"dateTime": "August 1, 2022 5:23 PM", "message": "Certified by Verifik.co"},
+        },
     }
 
     def lookup(self, country: str, plate: str, extra: dict[str, str] | None = None) -> dict[str, Any]:
@@ -433,19 +558,42 @@ class VerifikClient:
       EC: endpoint is reachable and auth is accepted (a clean structured 404
           came back for an unregistered plate), but no test plate ever
           produced a real 200 to confirm the success shape against.
+      BO/CR/PY/US: Verifik documents vehicle endpoints for these (v2/bo/vehicle,
+          v2/cr/vehicle, v2/py/vehicle, v2/usa/vehicle) but no real live
+          response has been observed here yet — confirm the success shape with
+          a real plate before adding them to _DEFAULT_CONFIRMED_PATHS.
     """
 
     # Read at call time, not at class-definition time: `make_client()` is
     # typically called well after `load_dotenv()` runs, but the *module*
     # import (and so this class body) happens before it — a class-level
     # `os.getenv(...)` here would freeze empty even with a real token on disk.
+    def __init__(self, registry: VehicleRegistryConfig | None = None):
+        # Prefer a config explicitly injected by the caller (e.g. the app's
+        # already-loaded `CFG.vehicle_registry`) over re-scanning config.yaml
+        # from the CWD, so the client never drifts from the app's settings.
+        self._injected_registry = registry
+
+    def _reg(self) -> VehicleRegistryConfig | None:
+        return self._injected_registry or _registry_cfg()
+
     @property
     def _base_url(self) -> str:
-        return os.getenv("VERIFIK_BASE_URL", "https://api.verifik.co").rstrip("/")
+        cfg = self._reg()
+        default = cfg.base_url if cfg else "https://api.verifik.co"
+        env_name = cfg.base_url_env if cfg else "VERIFIK_BASE_URL"
+        return os.getenv(env_name, default).rstrip("/")
 
     @property
     def _token(self) -> str:
-        return os.getenv("VERIFIK_TOKEN", "")
+        cfg = self._reg()
+        env_name = cfg.token_env if cfg else "VERIFIK_TOKEN"
+        return os.getenv(env_name, "")
+
+    @property
+    def _timeout(self) -> int:
+        cfg = self._reg()
+        return cfg.timeout_seconds if cfg else 15
 
     def lookup(
         self,
@@ -454,8 +602,10 @@ class VerifikClient:
         extra: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         if not self._token:
+            cfg = self._reg()
+            env_name = cfg.token_env if cfg else "VERIFIK_TOKEN"
             raise RuntimeError(
-                "VERIFIK_TOKEN is not configured — set it in the app's .env/secrets "
+                f"{env_name} is not configured — set it in the app's .env/secrets "
                 "to use the live registry API."
             )
         cfg = COUNTRY_CONFIG[country]
@@ -465,7 +615,9 @@ class VerifikClient:
 
     # Country code -> (URL path segment after /v2/<cc>/, extra query params to
     # forward beyond `plate`). Only countries confirmed via a real live call.
-    _CONFIRMED_PATHS: dict[str, tuple[str, tuple[str, ...]]] = {
+    # Defaults live here; `config.yaml` (`vehicle_registry.confirmed_paths`)
+    # overrides/extends them at runtime so endpoint changes are config-only.
+    _DEFAULT_CONFIRMED_PATHS: dict[str, tuple[str, tuple[str, ...]]] = {
         "PE": ("vehiculo/placa", ()),
         "CO": ("runt/vehicle-by-plate-simplified", ("document_type", "document_number")),
         "CL": ("vehicle", ()),
@@ -473,25 +625,43 @@ class VerifikClient:
         "BR": ("vehicle", ()),
     }
     # extra_inputs keys use snake_case; Verifik's own query params are camelCase.
-    _PARAM_RENAME = {"document_type": "documentType", "document_number": "documentNumber"}
+    _DEFAULT_PARAM_RENAME = {"document_type": "documentType", "document_number": "documentNumber"}
+
+    def _confirmed_paths(self) -> dict[str, tuple[str, tuple[str, ...]]]:
+        cfg = self._reg()
+        paths = dict(self._DEFAULT_CONFIRMED_PATHS)
+        if cfg:
+            for code, vp in cfg.confirmed_paths.items():
+                if not vp.path:
+                    continue
+                paths[code] = (vp.path, tuple(vp.extra))
+        return paths
+
+    def _param_rename(self) -> dict[str, str]:
+        cfg = self._reg()
+        if cfg:
+            return dict(cfg.param_rename) or dict(self._DEFAULT_PARAM_RENAME)
+        return dict(self._DEFAULT_PARAM_RENAME)
 
     def _call(self, cfg: CountryConfig, plate: str, extra: dict[str, str]) -> Any:
-        if cfg.code not in self._CONFIRMED_PATHS:
+        confirmed = self._confirmed_paths()
+        if cfg.code not in confirmed:
             raise NotImplementedError(
                 f"VerifikClient._call not yet confirmed for {cfg.code} — see the VerifikClient "
                 "docstring for what was actually tried and why it isn't wired up live."
             )
-        path, extra_keys = self._CONFIRMED_PATHS[cfg.code]
+        path, extra_keys = confirmed[cfg.code]
+        param_rename = self._param_rename()
         params = {"plate": plate}
         for key in extra_keys:
             if extra.get(key):
-                params[self._PARAM_RENAME.get(key, key)] = extra[key]
+                params[param_rename.get(key, key)] = extra[key]
         url = f"{self._base_url}/v2/{cfg.code.lower()}/{path}?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(
             url, headers={"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
         )
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:200]
@@ -509,15 +679,21 @@ def _deep_replace(node: Any, needle: str, replacement: str) -> Any:
     return node
 
 
-def make_client() -> VehicleClient:
+def make_client(config: Config | None = None) -> VehicleClient:
     """Live client when a token is configured, mock otherwise.
 
     PE/CO/CL/AR/BR are confirmed against a real live call (see VerifikClient
-    docstring); MX and EC will raise a clear NotImplementedError per lookup
-    once live, rather than silently returning mock data next to a real token.
+    docstring); MX, EC, BO, CR, PY and US will raise a clear
+    NotImplementedError per lookup once live, rather than silently returning
+    mock data next to a real token.
+
+    `config` (optional) lets a caller hand over the already-loaded `Config` so
+    the live client reuses the app's `vehicle_registry` settings instead of
+    re-scanning config.yaml from the CWD.
     """
-    if os.getenv("VERIFIK_TOKEN", ""):
-        return VerifikClient()
+    registry = config.vehicle_registry if config else None
+    if VerifikClient(registry)._token:
+        return VerifikClient(registry)
     return MockVehicleClient()
 
 
@@ -603,7 +779,7 @@ def bucket_status(result: dict[str, str]) -> str:
 def verified_download_df(
     rows: list[dict[str, Any]],
     expected_col: str | None = None,
-) -> "list[dict[str, Any]]":
+) -> list[dict[str, Any]]:
     """Rows re-keyed for the Excel/verification sheet, in display column order.
 
     The first column is always the plate; remaining canonical fields follow,

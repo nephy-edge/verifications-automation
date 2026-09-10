@@ -273,7 +273,6 @@ def test_month_name_date_parsed_to_iso():
 
 
 def test_detect_shape_on_mono_absa_text():
-    from phase1_ingestion_parsing.extract import detect_shape
 
     text = "\n".join(
         [
@@ -296,7 +295,6 @@ def test_detect_shape_on_mono_absa_text():
 
 
 def test_detect_shape_layouts():
-    from phase1_ingestion_parsing.extract import detect_shape
 
     assert detect_shape("SALDO ANTERIOR \n01-06 01-06 FOO 1.00 2.00")["layout"] == "two_date"
     assert detect_shape("12/03/2024 SALARY PAYMENT 1,500.00")["layout"] == "single_date"
@@ -308,6 +306,20 @@ def test_detect_shape_layouts():
         ]
     )
     assert detect_shape(iso)["layout"] == "iso_running"
+
+
+def test_detect_shape_maps_spanish_currency_labels():
+    """Peruvian/Mexican statements label the currency in Spanish ("MONEDA:
+    SOLES" = PEN, "DOLARES" = USD); detect_shape must map these to the ISO
+    codes so FX normalization converts the amounts rather than summing them as
+    if already in the base currency (real BBVA Peru statements use SOLES)."""
+    peru = detect_shape("CUENTA CORRIENTE\nMONEDA: SOLES\n01-06 01-06 FOO 1.00 2.00")
+    assert peru["layout"] == "two_date"
+    assert peru["currency"] == "PEN"
+    usd = detect_shape("MONEDA: DOLARES\n01-06 01-06 FOO 1.00 2.00")
+    assert usd["currency"] == "USD"
+    # ISO codes still pass through unchanged.
+    assert detect_shape("SAVINGS / KES Aug 2025")["currency"] == "KES"
 
 
 def test_tie_out_pass_and_fail():

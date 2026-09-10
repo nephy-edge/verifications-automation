@@ -9,11 +9,68 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Sequence
+from collections.abc import Sequence
 
 from phase0_foundations.config import Thresholds
 from phase0_foundations.models import ExceptionItem, VerificationRun
-from phase3_anomaly_reporting.rank import forensic_route
+from phase3_anomaly_reporting.rank import forensic_route, mandatory_fraud_referrals
+
+
+def _render_statement_breakdown(inputs: dict) -> list[str]:
+    """Render the statement-side breakdown section (computed by the watcher's
+    `_statement_breakdown`) as Markdown. Returns [] when absent, so a caller
+    that never populated it (e.g. tape-only runs, older reports) gets no
+    section at all — backward compatible."""
+    bd = inputs.get("statement_breakdown")
+    if not bd:
+        return []
+    base = bd.get("totals", {}).get("fx_base_currency", "USD")
+    lines = ["## Statement-side breakdown (independent bank/mobile vs tape)", ""]
+
+    t = bd.get("totals", {})
+    lines.append(
+        f"- Totals ({base}): bank in {t.get('bank_in', 0):,.2f} / "
+        f"bank out {t.get('bank_out', 0):,.2f} / total {t.get('bank_cash_total', 0):,.2f} "
+        f"({t.get('bank_rows', 0)} bank rows)"
+    )
+    lines.append("")
+
+    by_stmt = bd.get("by_statement") or {}
+    if by_stmt:
+        lines.append(f"### By statement ({base})")
+        lines.append("")
+        lines.append("| statement | rows | in | out |")
+        lines.append("|---|---:|---:|---:|")
+        for ref, s in sorted(by_stmt.items()):
+            lines.append(f"| {ref} | {s['rows']} | {s['in']:,.2f} | {s['out']:,.2f} |")
+        lines.append("")
+
+    by_cat = bd.get("by_category") or {}
+    if by_cat:
+        lines.append(f"### By category ({base})")
+        lines.append("")
+        lines.append("| category | rows | in | out |")
+        lines.append("|---|---:|---:|---:|")
+        for cat, s in sorted(by_cat.items(), key=lambda kv: -(kv[1]["in"] + kv[1]["out"])):
+            lines.append(f"| {cat} | {s['rows']} | {s['in']:,.2f} | {s['out']:,.2f} |")
+        lines.append("")
+
+    by_month = bd.get("by_month") or {}
+    if by_month:
+        lines.append(f"### By month ({base}) — tape vs bank")
+        lines.append("")
+        lines.append("| month | tape in | tape out | bank in | bank out |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for m in sorted(by_month):
+            b = by_month[m]
+            if not b.get("bank_rows") and not b.get("tape_rows"):
+                continue
+            lines.append(
+                f"| {m} | {b.get('tape_in', 0):,.0f} | {b.get('tape_out', 0):,.0f} | "
+                f"{b.get('bank_in', 0):,.0f} | {b.get('bank_out', 0):,.0f} |"
+            )
+        lines.append("")
+    return lines
 
 
 def _markdown(run: VerificationRun, thresholds: Thresholds | None = None) -> str:
@@ -58,6 +115,8 @@ def _markdown(run: VerificationRun, thresholds: Thresholds | None = None) -> str
         )
         lines.append("")
 
+    lines.extend(_render_statement_breakdown(inputs))
+
     lines.append(f"## Exceptions ({len(run.exceptions)})")
     lines.append("")
     if not run.exceptions:
@@ -80,6 +139,15 @@ def _markdown(run: VerificationRun, thresholds: Thresholds | None = None) -> str
         for e in forensic:
             lines.append(f"- [{e.kind}] {e.description}")
         lines.append("")
+
+    mandatory = mandatory_fraud_referrals(run.exceptions)
+    lines.append("## Mandatory fraud referrals (intent-based, independent of severity ranking)")
+    lines.append("")
+    if not mandatory:
+        lines.append("None.")
+    for e in mandatory:
+        lines.append(f"- [{e.kind}] {e.description}")
+    lines.append("")
 
     lines.append("## Human review")
     lines.append("")
@@ -135,6 +203,12 @@ def build_report(
             "count": len(forensic),
             "exception_ids": [e.id for e in forensic],
         }
+
+    mandatory = mandatory_fraud_referrals(run.exceptions)
+    report["mandatory_fraud_referrals"] = {
+        "count": len(mandatory),
+        "exception_ids": [e.id for e in mandatory],
+    }
 
     json_path = out / f"run_{run.id}.json"
     json_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")

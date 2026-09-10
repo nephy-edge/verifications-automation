@@ -6,6 +6,8 @@ __pycache__/
 # Secrets / environment
 .env
 *.service-account.json
+google_oauth_token.json
+*.oauth-client.json
 
 # Runtime artifacts
 verifications.log.jsonl
@@ -23,3 +25,8 @@ Thumbs.db
 
 # Tests / pytest cache
 .pytest_cache/
+
+# Google OAuth tokens (secrets)
+google_oauth*.json
+client_secret*.json
+

@@ -1,0 +1,42 @@
+[project]
+name = "verifications-automation"
+version = "0.1.0"
+description = "Lendable Risk workflow: deterministic verification engine + review dashboard."
+# 3.10 is the true floor: the code uses PEP 604 unions (X | None) and
+# zip(..., strict=), both Python 3.10+.
+requires-python = ">=3.10"
+
+# Optional developer tooling. Runtime deps stay in requirements.txt (exactly
+# pinned); these are the lint/test helpers that gate the "closed-loop
+# verification" rule in AGENTS.md.
+[dependency-groups]
+dev = [
+    "ruff>=0.9,<1",
+    "pytest>=8,<10",
+]
+
+[tool.ruff]
+line-length = 120
+src = ["."]
+
+[tool.ruff.lint]
+# Keep the gate tight but non-destructive: enforce the rules that catch real
+# bugs and dead code, without forcing a wave of reformatting across the repo.
+# E4/E7/E9 + F (pyflakes) always fire; B (bugbear) flags latent bugs; UP moves
+# to modern idioms. E501 (line length) is off by default here so existing
+# long strings aren't a hard error.
+select = ["E4", "E7", "E9", "F", "B", "UP"]
+ignore = [
+    "B008",  # function call in default arg — FastAPI Depends() pattern
+    "UP007", # typing.Optional vs | None — both used; keep consistent as-is
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The streamlit app is a single large view file; keep it lintable without
+# splitting logic out.
+"app/streamlit_app.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

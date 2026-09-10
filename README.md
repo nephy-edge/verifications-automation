@@ -50,7 +50,19 @@ Dependencies install only into this project’s `.venv` (never global):
 
 ```
 py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
+
+`requirements-dev.txt` installs the runtime deps plus the developer tooling
+(`ruff`, `pytest`) that runs the quality gate. `requirements.txt` alone is the
+runtime subset — fine for a bare deployment, but it will not give you the lint
+and test commands below.
+
+Run the quality gate (closed-loop verification, per AGENTS.md):
+
+```
+.\.venv\Scripts\ruff.exe check .
+.\.venv\Scripts\python.exe -m pytest
 ```
 
 Run end-to-end with the venv interpreter:

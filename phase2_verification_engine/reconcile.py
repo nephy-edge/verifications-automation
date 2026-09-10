@@ -20,6 +20,36 @@ def _pct(reported: float, calculated: float) -> float:
     return abs(reported - calculated) / abs(calculated)
 
 
+def estimate_gateway_fee(
+    reported: dict[str, Any], calculated: dict[str, Any], thresholds: Thresholds,
+) -> dict[str, Any]:
+    """SOP-2 "Gross vs. Net Verification": the loan tape reports collections
+    gross; independently calculated collections come from actual cash
+    in-flows, which are net of any payment-gateway commission the processor
+    deducted before settlement. A gap consistent with that (net < gross, by
+    no more than `gateway_fee_max_pct`) is reported here as its own line so
+    it's visible and accounted for separately, per the SOP -- not silently
+    absorbed into (or conflated with) a genuine unexplained variance.
+
+    Only ever classifies the gap as fee-explained when net is *less than*
+    gross by a small amount; net exceeding gross, or a gap larger than the
+    plausible-fee band, is left for the ordinary collections-variance check
+    in `reconcile()` to flag as usual.
+    """
+    rep_col = reported.get("collections", 0.0)
+    calc_col = calculated.get("collections", 0.0)
+    gap = rep_col - calc_col  # positive: net received is less than gross reported
+    gap_pct = (gap / rep_col) if rep_col else 0.0
+    within_range = 0 < gap_pct <= thresholds.gateway_fee_max_pct
+    return {
+        "gross_reported_collections": rep_col,
+        "net_calculated_collections": calc_col,
+        "estimated_gateway_fee": round(gap, 2) if gap > 0 else 0.0,
+        "estimated_gateway_fee_pct": round(gap_pct, 4) if gap > 0 else 0.0,
+        "within_plausible_gateway_fee_range": within_range,
+    }
+
+
 def reconcile(
     calculated: dict[str, Any],
     reported: dict[str, Any],
@@ -38,7 +68,8 @@ def reconcile(
     calc_col = calculated.get("collections", 0.0)
     rep_col = reported.get("collections", 0.0)
     col_var = _pct(rep_col, calc_col)
-    if col_var > thresholds.collections_variance:
+    gateway_fee = estimate_gateway_fee(reported, calculated, thresholds)
+    if col_var > thresholds.collections_variance and not gateway_fee["within_plausible_gateway_fee_range"]:
         exceptions.append(
             ExceptionItem(
                 id=f"{run_id}:recon:collections" if run_id else "recon:collections",

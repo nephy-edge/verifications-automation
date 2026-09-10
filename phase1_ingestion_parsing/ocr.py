@@ -83,7 +83,7 @@ def tesseract_available() -> bool:
     return os.path.exists(cmd) or bool(shutil.which(cmd))
 
 
-def _preprocess_image(image: "Image.Image") -> "Image.Image":
+def _preprocess_image(image: Image.Image) -> Image.Image:
     """Grayscale + contrast boost.
 
     A `Sharpness(2.0)` step used to run here too (ported from the original

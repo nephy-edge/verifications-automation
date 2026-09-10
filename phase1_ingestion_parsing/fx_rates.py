@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import urllib.request
-from typing import Iterable
+from collections.abc import Iterable
 
 PRIMARY_URL = "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{base}.json"
 FALLBACK_URL = "https://latest.currency-api.pages.dev/v1/currencies/{base}.json"

@@ -754,4 +754,617 @@ Per user question ("for scanned images, how do we go about that"), explained the
 
 **Fix**: `phase1_ingestion_parsing/ocr.py` â€” new `ocr_to_searchable_pdf(pdf_bytes) -> bytes | None`, using `pytesseract.image_to_pdf_or_hocr(..., extension="pdf")` per rendered page (Tesseract's own mode for writing an invisible, *positioned* text layer) merged across pages with `pypdf.PdfWriter`/`PdfReader` (a dependency requirements.txt already declared but nothing in the codebase actually used yet). `phase1_ingestion_parsing/extract.py` â€” new `_extract_numbered_table_from_ocr()`, tried in `extract_pdf()` before the existing flat-text `_extract_from_ocr()`: writes the searchable PDF to a temp file, runs the existing, unmodified `_scan_numbered_table()` against it (via `pdfplumber`, which can now read real word coordinates out of Tesseract's output the same as it would a native text layer), stamps currency/confidence/`ocr=True` exactly like the flat-text path. Runs its own independent OCR pass rather than sharing one with `_extract_from_ocr` (double Tesseract cost on a genuine scan, accepted deliberately) to avoid touching the well-tested flat-text path at all â€” this only adds a path, doesn't rewire an existing one. Does **not** help `extract_pdf_table_rows()`'s ruling-line table detection (still needs vector graphics a scan doesn't have) â€” a scan fed to the Transaction Matching tab now recovers real transaction *rows* via the canonical fallback it already had, but still only the 5 generic columns, not the file's real ones.
 
-**Verified, honestly**: real end-to-end test (`tests/test_extract.py::test_numbered_table_layout_via_ocr_on_a_real_synthetic_scan`, guarded by `tesseract_available()`) â€” rendered the real, tie-out-verified `samples/statement_absa.pdf` to page images (stripping the text layer, a genuine simulated scan) and ran it through `extract_pdf()`. Recovered **3 of the file's 15 real transactions**, each one checked against the native-text-layer parse for an exact match (date, amount, direction, description all correct) â€” real, correctly-parsed data, not noise. This is **0% -> ~20% recovery, a real and measured improvement, not a full fix**: many numbered rows still fail the parser's row-number regex after an OCR misread of the leading `#` token, and are silently dropped rather than counted, same as any other row that doesn't match a known pattern. Also added 2 mocked unit tests (searchable-PDF path tried and used when it finds rows; falls through to the flat-text path unchanged when it doesn't) and 3 new `tests/test_ocr.py` tests for `ocr_to_searchable_pdf` itself (garbage/empty bytes -> `None`; a real Tesseract round-trip confirms `pdfplumber` can read positioned words back out of what Tesseract writes). Full suite 130 -> **136 passed**. `requirements.txt` comment updated now that `pypdf` is actually used. Not yet pushed to `nephy-edge/verifications-automation` or deployed.
+**Verified, honestly**: real end-to-end test (`tests/test_extract.py::test_numbered_table_layout_via_ocr_on_a_real_synthetic_scan`, guarded by `tesseract_available()`) â€” rendered the real, tie-out-verified `samples/statement_absa.pdf` to page images (stripping the text layer, a genuine simulated scan) and ran it through `extract_pdf()`. Recovered **3 of the file's 15 real transactions**, each one checked against the native-text-layer parse for an exact match (date, amount, direction, description all correct) â€” real, correctly-parsed data, not noise. This is **0% -> ~20% recovery, a real and measured improvement, not a full fix**: many numbered rows still fail the parser's row-number regex after an OCR misread of the leading `#` token, and are silently dropped rather than counted, same as any other row that doesn't match a known pattern. Also added 2 mocked unit tests (searchable-PDF path tried and used when it finds rows; falls through to the flat-text path unchanged when it doesn't) and 3 new `tests/test_ocr.py` tests for `ocr_to_searchable_pdf` itself (garbage/empty bytes -> `None`; a real Tesseract round-trip confirms `pdfplumber` can read positioned words back out of what Tesseract writes). Full suite 130 -> **136 passed**. `requirements.txt` comment updated now that `pypdf` is actually used. Pushed to `nephy-edge/verifications-automation` (`9b5e4ff`), same shallow-clone-and-sync method as the previous push.
+
+## 2026-09-01 â€” Raw image uploads (the other option from the gap above), and a real limit found while verifying it
+
+Per user report ("if i upload the image statement, nothing happens") â€” the real cause: every `st.file_uploader` in the app restricts `type=` to `pdf`/`csv`/`xlsx`/`xls`, so Streamlit's own file picker rejects a `.png`/`.jpg` silently (no visible crash, easy to miss) before any of our code ever runs. This was the "accept raw image uploads" option flagged but not picked in the entry above.
+
+**Fix**: `app/streamlit_app.py::_save_upload()` now converts a raw image (`.png`/`.jpg`/`.jpeg`/`.tif`/`.tiff`/`.bmp`) into a single-page PDF at save time (Pillow, already a dependency), before anything else touches it. Every downstream PDF-only code path (`extract_pdf`, its new searchable-PDF OCR fallback, `extract_pdf_table_rows`) then handles it exactly like any other scanned PDF, with zero separate image-handling logic anywhere else. Extended the `type=` list on the two uploaders that already accepted `pdf` (Run tab's "Bank statements", Transaction Matching's "Independent source") to also accept image extensions; left uploaders that never accepted PDF either (Mobile money statements, loan tape, ledger, assets) untouched â€” out of scope, a different, unrequested expansion.
+
+**A real limit found while verifying this, not a bug**: uploaded each of the real Absa sample's 3 pages as a standalone image, one at a time, through the actual running app. None of the 3 individually recovered a real transaction â€” each correctly landed on the existing "needs manual spot-check" placeholder rather than a wrong answer, but not real data either, even though the *full 3-page document* (verified in the entry above) recovers some. Traced why directly: `_scan_numbered_table()` never resets its `header_columns` between pages â€” once it finds a clean header on any page, that mapping carries forward for every later page even if a later page's own repeated header OCRs poorly. A full multi-page scan benefits from whichever page's header OCR'd best; a single cropped page has no such fallback and lives or dies on that one page's own OCR fidelity for the header line specifically. Confirmed directly (bypassing the app): page 2 in isolation OCR'd its header line correctly (`_table_header_columns` found it) but every row line was missing its leading row-number token (an OCR dropout, not a header problem), so zero rows matched `_ROW_NUM_RE`; page 3 in isolation didn't even OCR its own header line cleanly this time (non-deterministic across OCR runs) and found nothing at all. Not fixed â€” flagged as a real, structural consequence of the existing coordinate-based design, not something to patch reactively per failure mode.
+
+**Verified**: full suite still **136 passed** (no test changes needed â€” `_save_upload` is UI glue tested live, per this project's existing convention of not unit-testing `streamlit_app.py`'s helpers). Live browser test, own Streamlit instance: uploading a real PNG (rendered from `samples/statement_absa.pdf`) to the Run tab's Bank statements uploader now accepts the file, runs the full pipeline to completion, and either recovers real rows or lands on the existing, clearly-worded placeholder â€” never silently does nothing, which was the actual bug reported. Cleaned up scratch test images/PDFs and the `out/` run-artifact folder (gitignored, nothing committed). Not yet pushed.
+
+## 2026-09-02 â€” Merged Transaction Matching into the Run tab
+
+Per user question ("do the run verification and transaction matching pages do the same thing") â€” answered no (Run verification is the required aggregate reconciliation that feeds the audit trail/sign-off; Transaction Matching is an optional, on-demand row-level drill-down that doesn't touch the audit trail) â€” then per follow-up request ("can i merge the two to one page"), asked which kind of merge: a plain visual combine (same two features, same separate uploads, just one page) or a deeper integration reusing the Run tab's already-uploaded files for matching automatically. User picked the plain combine.
+
+**Change**: `app/streamlit_app.py` â€” dropped `tab_match` from the `st.tabs([...])` call (5 tabs -> 4) and re-scoped its entire block from `with tab_match:` to a second `with tab_run:` block (Streamlit containers accept being reopened; content just appends in execution order) with a `st.divider()` ahead of it. No logic changed â€” same two uploaders, same preview/column-picker/totals/matching flow, just living inside "Run verification" below the Results section instead of its own tab.
+
+**Verified**: full suite still **136 passed** (no test touches `tab_match`'s internals). Live browser check on the running app: exactly 4 tabs now (`Run verification`, `Asset & vehicle verification`, `Review & sign-off`, `Audit log & hardening`), and scrolling down "Run verification" shows Upload -> Run -> Results -> a divider -> "Detailed transaction matching" in one continuous page. Not yet pushed.
+
+## 2026-09-02 â€” Transaction matching now reuses "1. Upload sources" instead of asking for files twice
+
+Per follow-up request ("have the second part replace the first one, but retain the option to get the loan tapes from redshift and use ledgers") â€” clarified scope first (asked whether "replace" meant removing the aggregate Run/Results flow entirely, or just removing transaction matching's own duplicate uploaders in favor of reusing what's already uploaded above). User picked the latter: keep the aggregate reconciliation flow (it's what feeds the audit trail/sign-off), just stop asking for the same files twice.
+
+**Change**: `app/streamlit_app.py` â€” removed the "Reported source"/"Independent source" `st.file_uploader`s from the transaction-matching section. In their place, two `st.selectbox`es built from candidates already available higher up the same page: reported = each uploaded loan-tape file, the Redshift-fetched tape (`loaded_tape_records`, labeled with the borrower name) if loaded, and each uploaded ledger file; independent = each uploaded bank statement and mobile-money file. New `_load_match_candidate(kind, payload)` resolves either a `("redshift", records)` pair (already in memory, no file to read) or a `("file", UploadedFile)` pair (saved via the existing `_save_upload` â€” image-to-PDF conversion included â€” then read via `read_raw_table`/`extract_pdf_table_rows` exactly as before) into `(records, columns, preview_df)`. Everything downstream (preview, column totals, column-picker matching, results) is unchanged â€” same variable names, same functions, just fed from the resolved candidate instead of a second upload.
+
+**Verified**: full suite still **136 passed** (no test exercises this UI-glue selection logic directly, consistent with this project's existing convention for `streamlit_app.py`). Live browser test against the real `Test docs/` files: uploaded `bank_transactions_with_codes.xlsx` as the Run tab's loan tape and `bank_statement_with_codes.pdf` as its bank statement (no separate matching upload); the matching section's dropdowns picked them up automatically (only one candidate per side, so each auto-selected); preview showed the correct real columns immediately; matching on "Transaction Code" vs "TRANSACTION CODE" gave the same correct **25 matched, 0/0 unmatched** result as before the refactor â€” confirms the reuse path produces identical results to the old duplicate-upload path. Not yet pushed.
+
+## 2026-09-08 â€” SOP 1 / Option A: loan-tape change-detection watcher (cash_watcher.py)
+
+Per user request ("do option a"), built the change-detection watcher that polls
+the Redshift Query API for each borrower's loan tape and auto-runs the
+verification pipeline whenever the tape changes, so reported/derived balances
+update near-instantly after a borrower loads a new tape (vs. the current
+manual "next time someone clicks Run" behavior).
+
+**What was added**:
+- erifications-automation/cash_watcher.py â€” a headless CLI watcher. Detects
+  change via a stable content watermark per borrower (row count + sorted-SHA-256
+  over canonicalized rows, order-insensitive so Spectrum's non-deterministic scan
+  order doesn't cause false re-runs). On change, fetches the tape and runs the
+  same deterministic pipeline the Streamlit dropdown uses (normalize to events,
+  live-FX-normalized aggregates, reconcile, anomaly, rank) and writes a working
+  paper + audit-log entry. CLI: --once (poll once), --interval N, --dry-run
+  (detect only), --borrower X (restrict), --config. Loop mode polls forever.
+- phase0_foundations/config.py â€” new WatcherConfig dataclass wired into
+  Config.sop1 (interval, state file, fetch limit, borrowers, cut-off guard,
+  reported totals).
+- config.yaml â€” new sop1.watcher block, data-driven (enabled master switch
+  default false, interval 600s, state_file: out/cash_watcher_state.json,
+  	ape_fetch_limit: 1000, borrowers list, cut_off_date/cut_off_mode
+  hard_stop|backdate, reported totals).
+- 	ests/test_cash_watcher.py â€” watermark stability/order-insensitivity,
+  state round-trip, change detection (new/unchanged/re-added), fetch-error
+  resilience (per-borrower and borrower-list), cut-off guard, config parsing.
+  9 tests.
+
+**Design / scope notes**:
+- Read-only by construction: only SELECTs via the edshift-api gateway (which
+  enforces SELECT-only + schema allowlist + row caps server-side). No DML/DDL.
+- Cut-off guard: if a detected change's latest egin_date is after
+  cut_off_date, hard_stop refuses to run (flags it), ackdate runs but
+  marks the run post_cut_off in the state file. Default ackdate, disabled
+  until a cut-off date is set.
+- Default eported derivation mirrors the Streamlit dropdown path (collections/
+  disbursements come from the tape itself, so no false reconciliation variance).
+- Transient API outages (per-borrower or the /borrowers list) degrade to "no
+  changes this poll" rather than killing the long-running loop.
+- Deliberately not over-built (do-not-rebuild): no ML, no PDF/statement handling
+  here â€” it watches the tape and runs the existing engine. It does NOT yet
+  auto-pull bank statements via Bank Access/ open-banking (separate
+  integration), so unreconciled cash remains best-effort until that's wired.
+
+**Verified**: full suite still green (207 passed, no regressions). ruff clean on
+cash_watcher.py, config.py, 	est_cash_watcher.py. CLI --once --dry-run
+confirmed to not crash on unset REDSHIFT_API_KEY (reports and exits 0). Not
+yet pushed.
+
+## 2026-09-08 (follow-up) â€” closed the biggest untested gap in the watcher
+
+User asked "have you tested it out to see if it works" â€” honest answer was: unit
+logic and CLI resilience tested, but the end-to-end auto-run path (_headless_run
+fetch -> detect -> run -> working paper) had only been exercised through mocked
+network fakes, never with real row processing, because it's fed entirely from a
+live API that wasn't reachable. Added 	ests/test_cash_watcher.py::
+test_headless_run_produces_working_paper â€” feeds a synthetic redshift-style
+per-loan tape into _headless_run (the exact function the watcher calls after a
+detected change) and asserts: run status = done, non-zero collections and
+disbursements aggregates, a un_<id>.json working paper written under
+out/<borrower>/, and a watcher_run_completed audit-log line. Full suite now
+**208 passed**, ruff clean.
+
+Still not covered (needs live infra, out of scope for offline tests): an actual
+poll against a running edshift-api with a real key and a real borrower tape,
+and confirmation that reconcile/anomaly run on real normalized rows for every
+borrower's actual column layout. Those require the API up + REDSHIFT_API_KEY.
+
+## 2026-09-09 â€” Watcher review fixes (all review findings addressed)
+
+Addressed every finding from the /review uncommitted pass on cash_watcher.py:
+
+1. **Cut-off guard now uses the borrower's real date column** â€” _latest_begin_date
+   (hardcoded egin_date) replaced with _latest_date(rows, column) where
+   column is resolved per borrower via loan_tape_columns.resolve(borrower).
+   This means payjoy/metafin (which use origination_date/emi_begin_date, per
+   config.yaml's existing overrides) are correctly cut-off guarded instead of
+   silently always "ok". State now stores latest_date + date_column.
+2. **Failed auto-run is retried** â€” _poll_once now captures the
+   VerificationRun; last_run_at/post_cut_off only advance on
+   status == "done", and on failure the stored watermark is popped so the next
+   poll re-detects and retries instead of silently consuming the change.
+3. **Vacuous reconciliation surfaced** â€” the report's un.inputs now carries
+   independent_source_present: false and a econciliation_scope note stating
+   the watcher ingested only the tape (no bank/mobile side), so a green report is
+   not misread as "the tape ties out to real inflows/outflows".
+4. **No more double fetch** â€” detect_changes now returns the just-fetched rows
+   (orrower_rows) so _poll_once runs without a second API round-trip; the
+   re-fetch path remains only as a fallback.
+5. **Sampled-watermark caveat documented** â€” module docstring warns the watermark
+   covers the fetched window of a non-deterministic Spectrum scan, so the watcher
+   is a sampled detector (rare false re-run possible; larger reads for full coverage).
+
+Tests: 	ests/test_cash_watcher.py grew to 13 cases (borrower-variant cut-off,
+retry-on-failure, independent-source-absent report content, latest_date helper).
+Full suite **211 passed**, ruff clean. CLI --once --dry-run still degrades to
+exit 0 on unset REDSHIFT_API_KEY. Not yet pushed.
+
+## 2026-09-09 â€” Wire Drive statement drop-folder into the watcher (SOP 1 independent side + audit trail)
+
+Per user guidance (â€œwhy not have manual statements put in a drive folder and fetched
+from there, as we donâ€™t currently have a way of fetching them automaticallyâ€), wired
+a **Google Drive statement drop-folder** into cash_watcher.py so the watcherâ€™s
+previously-vacuous reconciliation now has a real independent bank/mobile side:
+
+**What was added:**
+- phase0_foundations/drive_inbox.py â€” a read-only (drive.readonly) Drive inbox
+  reader: InboxFile (id + modifiedTime ingerprint for idempotent ingestion),
+  list_new_statements(folder), download_file(). Uses its OWN OAuth token
+  (GOOGLE_OAUTH_INBOX_TOKEN_JSON), separate from gsheet_export.pyâ€™s drive.file
+  scope (which only sees files the app created and cannot list a human-uploaded
+  folder). Additive only; the Sheets export feature is untouched.
+- erifications-automation/scripts/google_oauth_setup_inbox.py â€” one-time browser
+  auth granting drive.readonly.
+- phase0_foundations/config.py â€” BankStatementsConfig (enabled, inbox folder,
+  per-borrower folder overrides) nested under WatcherConfig.
+- config.yaml â€” sop1.watcher.bank_statements block (default disabled).
+- .env.example â€” documents GOOGLE_OAUTH_INBOX_TOKEN_JSON.
+
+**Watcher changes (cash_watcher.py):**
+- _headless_run accepts ank_rows; when present, calculated = independent bank
+  aggregates vs eported = tape (a real cross-check) and independent_source_present
+  flips to True; the report sets ank_statement_count and calculated_* aggregates.
+  When absent, it stays explicitly â€œNOT VERIFIEDâ€ (never a false green).
+- _fetch_bank_statement_rows(cfg, borrower, state) downloads new inbox files, retains
+  the raw bytes under out/<borrower>/statements/ (the audit trail), records ingested
+  fingerprints in state so a file is downloaded once, and re-parses retained files on
+  retried runs so a failed run reconciles against the same independent data.
+- Fixed a real Windows bug surfaced by the new test: the retained filename used the
+  raw fingerprint (ISO timestamp with :), which is invalid in Windows filenames â€”
+  now sanitised (e.sub).
+
+**Verification:** kept read-only by construction (only lists/downloads; never
+creates/edits/moves Drive content). Watcher tests grew to 16 (drive ingestion +
+idempotency, independent-verified reconciliation, retry) + a new test_drive_inbox.py
+(fingerprint, config). Full suite **219 passed**, ruff clean. CLI smoke still exit 0.
+
+**Caveats / scope:**
+- Requires the one-time google_oauth_setup_inbox.py (drive.readonly grant); until
+  then the watcher Degrades to tape-only rather than crashing.
+- Processed-tracking is by (file_id, modifiedTime) fingerprint in the state file â€”
+  the raw files are left in place (read-only scope cannot move them), which is also a
+  cleaner audit trail.
+- For a live end-to-end check the API + key + Drive grant all need to be present
+  (not possible in this offline session).
+
+## 2026-09-09 - leasy full-tape reconciliation: tape_fetch_limit=0 ships + end-to-end run
+
+Verified the prior work is in place, closed the remaining steps, and ran the
+watcher end-to-end against leasy's FULL tape.
+
+**Prior work confirmed in place:**
+- cash_watcher.py: `_FULL_TAPE_LIMIT()` (1,000,000) + `_effective_tape_limit(cfg)`
+  (0/negative -> full-tape sentinel; positive passed through). Both
+  `_fetch_tape(...)` call sites (detect_changes at line ~173, _poll_once fallback
+  at ~427) call `_effective_tape_limit(cfg)`. Docstring updated re: full vs sampled.
+- config.yaml sop1.watcher.tape_fetch_limit: 0; config.py WatcherConfig default and
+  from_dict both 0.
+
+**Test added:** test_effective_tape_limit_zero_means_full_tape asserts 0 and -1
+resolve to _FULL_TAPE_LIMIT() and a positive value passes through (sampled).
+Imported _FULL_TAPE_LIMIT/_effective_tape_limit into tests/test_cash_watcher.py.
+
+**Quality gate:** pytest tests/test_cash_watcher.py tests/test_drive_inbox.py = 21
+passed (was 20, +1 sentinel test). ruff check . = clean. Nothing my edits broke.
+
+**OCR check:** tesseract is NOT on PATH but exists at
+C:\Program Files\Tesseract-OCR\tesseract.exe (resolved by ocr.py
+_WINDOWS_TESSERACT_PATHS fallback). tesseract_available() -> True; deps
+(pytesseract, pypdfium2, PIL, pypdf) all import. extract_pdf() on the retained
+scanned statement returned parsed bank rows with ocr=True. Scanned PDF IS
+readable through the OCR path.
+
+**End-to-end run (full tape):** `.venv\Scripts\python.exe cash_watcher.py
+--once --borrower leasy` against the live redshift-api (46 borrowers, leasy
+present). State rows went 1000 (sampled) -> **5161 (full tape)**; watermark
+d2b3bc5b... -> 9da1d343...; latest_date 2026-07-22 -> 2026-09-02. New report
+out/leasy/run_c7a70a61aeb3.json: independent_source_present=true,
+reconciliation_scope="verified against independent bank/mobile statement side",
+bank_statement_count=50, rows_ingested=10265 (5,161 tape rows x2), coverage 100%,
+cash_total=153,394,549.57 USD (currencies PEN+MXN, live FX as of 2026-09-08).
+Raw statement retained at out/leasy/statements/bank_statement_scanned_image.pdf
+(audit trail). Second --once poll = "no changes" (stable full-tape watermark) and
+no re-download (fingerprint already ingested) -> idempotency confirmed.
+
+**Cleanup:** removed temporary _probe_leasy.py. Re-ran quality gate after cleanup:
+21 pytest passed, ruff clean.
+
+**Guardrails:** read-only only (SELECT via redshift-api /query); no DML/DDL; all
+work inside verifications-automation; used .venv\Scripts binaries exclusively.
+
+## 2026-09-09 - OCR diagnostic on leasy statement: extraction is EXACT; source is a sample/mismatch
+
+Follow-up to the full-tape reconciliation. The leasy scanned statement
+(out/leasy/statements/bank_statement_scanned_image.pdf) was examined in detail
+to determine whether the huge tape-vs-statement variance was an OCR/recovery
+problem or a source problem.
+
+**Diagnostic run (read-only, .venv):**
+- PDF is 2 pages (portrait 1241x1754), fully scannable.
+- Raw OCR via ocr_extract_text() recovered the complete text layer (2,730 chars,
+  56 lines, 114 numeric tokens including running balances).
+- The OCR text shows a statement header "APEX STERLING BANK" / customer
+  "Jane Doe" / 1001 Pinehurst Ave, San Francisco -> clearly a SAMPLE / fictional
+  personal retail statement, Statement Period Jun 01-Jun 30 2026, acct *******1294.
+
+**Result: OCR extracts properly and COMPLETELY.**
+- extract_pdf() recovered exactly 25 statement rows (17 on p1, 8 on p2) - 100% of
+  the transactions on the scan, none dropped.
+- 10 deposits = $12,466.98 total; 15 withdrawals = $889.93 total. These EXACTLY
+  match the statement's own printed ACCOUNT SUMMARY (TOTAL DEPOSITS $12,466.98,
+  TOTAL WITHDRAWALS $889.93, ENDING BALANCE $17,009.15). Zero OCR loss.
+- Hence the pipeline's calculated_collections=12,466.98 and
+  calculated_disbursements=889.93 are correct for this source.
+
+**Conclusion - this is a source mismatch, NOT an OCR/pipeline defect.**
+- The uploaded file is a sample personal-account statement (payroll, coffee,
+  groceries, Zelle, ATM), unrelated to leasy's loan book.
+- The loan tape (5,161 loans -> 10,265 transactions; ~$80.8M collections /
+  $72.6M disbursements) cannot reconcile against it - hence the ~3,000x
+  variance exceptions in run_c7a70a61aeb3. The reconciliation still runs
+  (independent_source_present=true) but the source is not leasy's operating/
+  collection account.
+- No OCR->JSON restructure is warranted: the two-stage OCR->JSON->calculate
+  design is already in place and proven exact on this scan.
+
+**Flagged action:** the leasy Drive inbox folder (1ck-AX_01AOZNIwpB-vFjCEaWz7KDZYwU)
+needs a CORRECT operating/collection-account statement uploaded for leasy to get a
+meaningful independent reconciliation. Treat the current 5,016 variance exceptions
+as reflecting a wrong-source sample, not a real accounting discrepancy.
+
+## 2026-09-09 (follow-up) — "HTTP Error 500" diagnosed: NOT the full-tape limit; Redshift Serverless is flapping. Full-tape re-run still reconciles.
+
+**Symptom:** `cash_watcher.py --once --borrower leasy` returned "HTTP Error 500" on
+the tape fetch twice in a row, after the same limit=1000000 fetch worked at 08:18.
+Hypothesis (from the prior session): the large full-tape request might be the cause.
+
+**Probe (read-only, .venv, live API at http://127.0.0.1:8001):**
+- `/loan-tape?borrower=leasy&limit=100|1000|100000|1000000` -> ALL FOUR returned the
+  *same* failure (at the time: `404 Unknown borrower 'leasy'. Available: ` with an
+  empty list). A limit-induced 500 would not fail identically at limit=100.
+- `/health/db` -> `503 Database unreachable: connection to ... port 5439 failed:
+  Connection timed out (10060)`; `Test-NetConnection` to the endpoint: TCP + ping
+  both failed.
+- `/borrowers` -> `{"borrowers":[]}` while the DB was down (the server-side
+  `_load_borrower_names` refresh query fails and returns the stale cache, which was
+  empty). When the borrower cache is still warm, `/loan-tape` instead fails later at
+  `db.fetch_all` -> the real `500 Query failed: <connection error>` the watcher saw.
+
+**Conclusion — the 500 is a DB outage, not a limit problem:**
+- Server-side `redshift-api/.env` has `MAX_RESULTS_LIMIT=2000000` (confirmed),
+  comfortably above the watcher's `_FULL_TAPE_LIMIT()` of 1,000,000.
+- The endpoint's resolved IP changed during the session (public 44.254.226.217 ->
+  private 10.1.56.196), with `Connection timed out` / `SSL connection has been
+  closed unexpectedly` / `unrecognized SSL error code: 6` at different moments — a
+  Redshift Serverless workgroup that is pausing/resuming/reconfiguring, i.e. a
+  genuinely flapping infra dependency. The DB recovered briefly (09:15, /health/db
+  200; full tape fetched at 09:18) and dropped again (09:26/09:28).
+- No code change to the fetch path is warranted: no chunked fetch, no
+  `_FULL_TAPE_LIMIT` reduction (either would turn the watcher into a sampled
+  detector to fix a problem that isn't the limit). The watcher already degrades
+  correctly (per-borrower fetch error -> "no changes this poll", watermark kept so
+  a later poll retries).
+
+**Code change made (observability, tiny + tests):** `cash_watcher._api_get` now
+catches `urllib.error.HTTPError` and re-raises a `RuntimeError` carrying the API's
+own JSON `detail` (e.g. `HTTP 500 from /loan-tape?...: Query failed: ... SSL
+connection has been closed unexpectedly`) instead of the bare `HTTP Error 500`.
+Verified live: the watcher's log line now names the actual DB error and the endpoint
+IP, so the next outage is self-diagnosing from the watcher log alone. New tests:
+`test_api_get_surfaces_server_error_detail`, `test_api_get_surfaces_non_json_error_body`.
+
+**Real defect found during verification and fixed (state clobber):** while
+re-verifying the cross-file dedup, the retained-statement dir had grown to 7 files
+(6 real BBVA PEN monthly statements + the sample) and the run log showed
+`dropped 25 duplicate row(s) ... 207 unique row(s)` — the dedup collapsed the
+sample's 25 rows that were parsed twice in one cycle. Root cause of the
+double-parse: `detect_changes` rebuilt each borrower entry from scratch, silently
+**dropping `ingested_statements`** (the Drive drop-folder idempotency record), so
+every change-triggered run treated every inbox file as new and re-downloaded +
+re-parsed it (the dedup then masked the double-count). Fix: `detect_changes` now
+preserves `ingested_statements` from the previous entry when rebuilding it. New
+test: `test_detect_changes_preserves_ingested_statements`. Verified: a forced
+re-run after the fix no longer re-downloads (no "ingested N new statement file(s)")
+and produces the same 207-row independent side.
+
+**Full-tape re-run result (run_9dbdbc5d52b6, 09:18, while the DB was briefly up):**
+- Tape: full 5,161 rows fetched at limit=1000000 (rows_ingested 10,422 normalized
+  events), watermark unchanged (9da1d343...), status done.
+- `independent_source_present=true`, `reconciliation_scope="verified against
+  independent bank/mobile statement side"`, `bank_statement_count=207`.
+- Independent side now includes 6 REAL leasy operating-account statements (BBVA PEN
+  monthly JAN-MAR-APR-MAY-JUN 26, text-layer, confidence 1.0, 25-35 rows each =
+  182 rows) plus the fictional sample (25 rows, OCR conf 0.6) — all de-duplicated.
+  calculated_collections=27,221,932.31 USD / calculated_disbursements=23,744,807.69
+  / calculated_cash_total=50,966,740.00 (PEN+MXN, live FX as of 2026-09-08) vs
+  tape reported collections 80,767,532.26 / disbursements 72,627,017.31 /
+  cash_total 153,394,549.57. 5,027 exceptions (variance remains large because ~6
+  months of operating flows vs a cumulative loan book — but the independent side is
+  now REAL operating data, addressing the prior "source is a sample" caveat).
+- The sample statement is counted exactly once (25 rows) — the original 50-row
+  double-count is gone.
+
+**Quality gate:** tests/test_cash_watcher.py + tests/test_drive_inbox.py = 27
+passed (was 24, +2 api_get, +1 state-preservation); full suite 235 passed; ruff
+clean on cash_watcher.py + both test files.
+
+**Open / needs the user or infra team:** the Redshift Serverless workgroup was
+unstable (public->private IP flip, SSL errors). RESOLVED on its own: the DB came
+back up (~10:17) and the final confirmation run completed (see below). The
+endpoint flapping itself (public 44.254.226.217 -> private 10.1.56.196, SSL
+errors) is worth a glance by whoever owns `workgroup-xlarge.897058370678.us-west-2`
+(repeated pause/resume can look exactly like this); the watcher code needs nothing.
+
+**Final confirmation run (run_d2c8f90ac684, 10:18, DB up):** `--once --borrower
+leasy` re-ran the full-tape reconciliation to completion:
+- status done; full 5,161-row tape fetched at limit=1000000 (rows_ingested 10,422
+  normalized events, coverage 100%), watermark restored to 9da1d343... (tape
+  unchanged).
+- independent_source_present=true; bank_statement_count=207 (6 real BBVA PEN
+  statements 182 rows + sample 25 rows, de-duplicated; sample counted exactly
+  once).
+- calculated_collections=27,221,932.31 / calculated_disbursements=23,744,807.69 /
+  calculated_cash_total=50,966,740.00 USD vs tape 80,767,532.26 / 72,627,017.31 /
+  153,394,549.57; 5,027 exceptions — byte-identical to run_9dbdbc5d52b6 (09:18),
+  confirming determinism and reproducibility.
+- No statement re-download occurred (no "[bank] ingested N new statement file(s)"
+  line) — the ingested_statements-preservation fix held: the 7 retained files were
+  re-parsed locally only.
+- State: rows 5161, watermark 9da1d343..., last_run_at 10:18:47, ingested_statements
+  (7 fingerprints) preserved.
+
+## 2026-09-09 (follow-up) — leasy variance attribution: 5,027 exceptions decomposed
+
+Per user request ("do 1"), ran a read-only attribution of the 5,027 exceptions in
+run_d2c8f90ac684 to separate real signal from artifacts. Result: the count is
+~99.9% anomaly-rule noise on the tape side; the 3 real reconciliation variances
+are much larger than the report showed once a currency bug is fixed.
+
+**Finding 1 — currency bug (real, fixed):** the BBVA Peru statements label their
+currency as `MONEDA: SOLES`, but `detect_shape`'s `_CURRENCY_RE` only matched ISO
+codes (`\b(PEN|USD|...)\b`), so the BBVA rows carried a blank currency and were
+summed as if already-USD. Fixed: `_CURRENCY_RE` now also matches `SOLES`/`DOLARES`
+(case-insensitive) and `detect_shape` maps them to PEN/USD via `_CURRENCY_ALIASES`.
+New test `test_detect_shape_maps_spanish_currency_labels`. Effect: the calculated
+(independent) side drops from 27.2M "USD" (actually PEN) to the true **8.1M USD**.
+Report regenerated: `run_f5f5d05cca70` (status done, independent=true,
+bank_statement_count=207).
+
+**Finding 2 — honest reconciliation variances (run_f5f5d05cca70):**
+- collections: reported 80,767,532 vs calculated **8,119,984 USD** ? 894.7% (was
+  mis-stated as 196.7% in the pre-fix report)
+- disbursements: 72,627,017 vs **7,075,789 USD** ? 926.4%
+- cash: 153,394,550 vs **15,195,773 USD** ? 909.5%
+
+**Finding 3 — why the variance is this large (the substance):**
+1. **Period mismatch (dominant):** the tape spans 2018-09-25 .. 2026-09-02 (an
+   8-year cumulative loan book, 10,215 events) while the statements cover only
+   Jan-Jun 2026 (207 rows). Total-vs-total inherently mixes the two.
+2. **Even month-by-month in the overlap, tape > bank ~2-3x:** tape-derived
+   collections $2.5-5.8M/mo vs actual bank inflows (via Kushki) $1.3-1.5M/mo for
+   2026-01..06. The tape's "collections" are DERIVED (`total_loan_amount` minus
+   outstanding, an estimate that counts scheduled-not-yet-collected amounts), not
+   actual cash.
+3. **The account is an operating/treasury account, not a pure collections
+   account:** $8.1M in via **Kushki** (payment processor — the real collection
+   channel), $7.0M out as **internal Leasy funding transfers** ("OP FX/TC PF LEASY
+   II", 2.2-5.4M PEN each — treasury movement, not expense), plus small fees/taxes.
+   So a direct "collections vs cash-in" comparison against ONE account is the wrong
+   scope until the full operating-account set is in.
+
+**Finding 4 — the 5,024 anomaly exceptions are tape-side noise, not signal:**
+- **roundtrip 3,334 — 100% artifact.** `normalize_loan_tape_row` dates a
+  collection at `closure_date` ? `company_due_date` ? **fallback `begin_date`**
+  (ingest.py line ~159). 3,334 of 5,054 loans with a collection event have BOTH
+  closure and company-due dates blank, so the collection is dated at begin_date —
+  identical to the disbursement date — fabricating "same-day disbursement +
+  collection." Verified exactly 3,334 = the full roundtrip count. Zero real
+  same-day round-tripping (only 6 loans genuinely close on their begin date).
+- **vol 820 / round 599 / seqjump 242 / microsplit 29** — portfolio-natural
+  patterns on the tape rows (large loans exceed the median-based volume threshold,
+  loan sizes are round, many tape events share a synthetic `account_ref='redshift'`
+  + date so the same-day microsplit rule groups them). Not laundering signal.
+
+**Recommendations (not yet implemented — flagging for a decision):**
+1. Fix the collection-date fallback: when a loan has no closure/company-due date,
+   do not fabricate `begin_date` as the collection date (leave undated / flag),
+   which removes the 3,334 false roundtrips at the source.
+2. Decide whether tape-side anomaly rules (vol/round/seqjump/microsplit) belong on
+   the tape at all, or should be scoped to the bank side where structuring
+   patterns actually live — the tape is a reported snapshot, not a transactions
+   ledger, so most "anomalies" there are product-natural.
+3. The real business question to take to loan ops: the ~3x gap between
+   tape-derived collections and actual Kushki inflows in the covered months — is it
+   (a) other collection channels/accounts not yet in the inbox, (b) DPD loans
+   counted as collected-to-date by the derivation, or (c) genuinely uncollected?
+   That decides whether the reconciliation needs more statement coverage or a
+   corrected collection definition.
+
+**Quality gate:** full suite 237 passed, ruff clean on the whole project. Scratch
+attribution script removed (findings recorded here).
+
+## 2026-09-09 (follow-up) — report now shows the statement-side breakdown + email delivery
+
+Per user request ("is it possible to get this in the report" / "can i have the
+report sent to my email"), two additive features:
+
+**1. Statement-side breakdown in the working paper.** The watcher now computes a
+`statement_breakdown` (cash_watcher._statement_breakdown) for every run and stores
+it in `run.inputs["statement_breakdown"]`; reporter.py renders a new
+"## Statement-side breakdown (independent bank/mobile vs tape)" section in the .md
+when present (absent = backward compatible). It shows, all FX-converted to USD:
+- totals (bank in / out / total, row count)
+- per-statement file (rows, in, out)
+- per-category (deterministic classification: kushki payment-processor / leasy
+  internal funding transfer / itf tax / bank fee / other)
+- per-month tape vs bank (so the SOP-1 period-mismatch story is visible in the
+  report itself, not just an ad-hoc analysis)
+Verified live on leasy (run_2a90ea981cd2): totals bank in 8,119,984.02 / out
+7,075,788.89, Kushki 8.1M in, internal transfers 7.0M out, monthly table renders.
+Tests: test_reporter.py::test_statement_breakdown_rendered_in_markdown_when_present.
+
+**2. Report email delivery (Gmail API via OAuth — no password).** New
+`phase0_foundations/gmail_send.py` (Gmail API `gmail.send` scope, mirroring the
+Drive-inbox OAuth pattern: google-auth + googleapiclient, silent token refresh)
+and `phase0_foundations/emailer.py` (composes the .md + .json as a MIME message,
+delivers via the Gmail API). New `EmailConfig` nested under `WatcherConfig`;
+config.yaml `sop1.watcher.email` block (from_addr/to_addrs/subject_prefix +
+gmail_token_env); token path read from .env at send time via
+`GOOGLE_OAUTH_GMAIL_TOKEN_JSON`. One-time setup script
+`scripts/google_oauth_setup_gmail.py`. Wired into cash_watcher: `_send_run_email`
+after every change-triggered done run emails the run's .md + .json (the disk write
+remains the audit trail; email is additional delivery; outage is logged, never
+fatal). Tests: tests/test_emailer.py (7: config, unconfigured skips, success
+delivers raw MIME with both attachments, missing files skipped, Gmail failure
+raises) + tests/test_gmail_send.py (3: missing-token error, expired-token refresh,
+API send payload) + tests/test_cash_watcher.py (2 glue tests).
+
+**Transport decision (user): SMTP app password was the first plan, but the user
+cannot create one — nephy@lendable.io is corporate Google Workspace and the
+domain admin has disabled app passwords. Switched to the Gmail API / OAuth path
+(no password, one-time browser grant), which reuses the project's existing Google
+OAuth client.** Gated per repo rule: `enabled: true` in config but the send only
+becomes real after the user runs `python scripts/google_oauth_setup_gmail.py`
+(and the Gmail API is enabled on the Cloud project for that OAuth client); until
+the token exists the watcher logs a clear "run google_oauth_setup_gmail.py"
+message instead of sending. Then one live run confirms delivery.
+
+**Live verification (2026-09-10, confirmed):** the user completed the one-time
+Gmail grant (`python scripts/google_oauth_setup_gmail.py`, browser consent for
+gmail.send) and the token saved with a refresh token. A forced leasy watcher run
+then sent the working paper for real via the Gmail API:
+`[run] leasy -> out/leasy/run_51e985dbb747.json ... [mail] leasy: working paper
+emailed to nephy@lendable.io`. Full path verified end-to-end: fetch full tape ?
+pipeline ? report ? Gmail API send (no SMTP, no password).
+
+**Quality gate:** full suite 258 passed, ruff clean on the whole project. leasy
+report regenerated end-to-end (run_2a90ea981cd2) with the new section.
+
+## 2026-09-10 — statement uploads are now their own trigger (no human in the loop)
+
+Per user request ("if i upload statements to a random folder, it should be able
+to do this without any human in the loop"): before this change, a run only fired
+when the loan TAPE changed — statements were fetched opportunistically during a
+tape run, so uploading a statement alone did nothing. Now a statement upload is a
+first-class change trigger:
+
+- New `cash_watcher._detect_new_statements(cfg, state, borrowers)`: per poll,
+  lists each borrower's configured Drive drop-folder and returns borrowers whose
+  inbox holds files whose (file_id, modifiedTime) fingerprint is not yet recorded
+  as ingested. `detect_changes` adds those borrowers to `changed` even when the
+  tape watermark is unchanged, so `_poll_once` runs the pipeline (ingests the new
+  statements, reconciles, writes the report, emails the .docx working paper).
+- Fully read-only (only lists the Drive folder); tolerant — an unconfigured/
+  inaccessible inbox just contributes no statement-triggered runs (tape-only),
+  never an error. Ingestion idempotency still holds: fingerprints are recorded
+  once ingested, so a file is not re-triggered/re-downloaded on later polls.
+- Retry semantics unchanged: if the run fails, the tape watermark is popped and
+  the next poll retries (statements already retained are re-parsed locally).
+
+**Requirements for the no-human flow to work:**
+1. Statements must be uploaded to the borrower's CONFIGURED Drive subfolder
+   (config.yaml sop1.watcher.bank_statements.folder_by_borrower.<borrower>, or
+   inbox_folder fallback) — a "random" folder is never scanned.
+2. The watcher must actually run on a schedule (Task Scheduler `--once` every N
+   minutes, or `--interval` loop); "immediate" = within the poll cadence.
+3. `bank_statements.enabled: true` and the Drive inbox token present.
+No human review gate blocks the run/report/email; human review is a downstream
+step, not a blocker.
+
+Tests: tests/test_cash_watcher.py +3 (flags un-ingested only via configured
+folders, tolerates inbox errors, statement-triggers change when tape unchanged).
+Quality gate: full suite 265 passed, ruff clean.
+
+## 2026-09-10 — cloud (GitHub-hosted runner) scheduling groundwork
+
+Per user choice ("Cloud (hosted runner)"), started the pieces that make the
+watcher run on a GitHub-hosted (ephemeral) runner. Two hard requirements drove
+the design: (1) the redshift-api must be publicly reachable (a cloud runner
+can't see 127.0.0.1:8001), and (2) ephemeral runners wipe the filesystem each
+run, so the watcher's state + retained statements must persist somewhere.
+
+**Added:**
+- `phase0_foundations/drive_store.py` — mirrors the watcher's `out/` directory
+  to an app-created Google Drive folder ("cash-watcher-state", under
+  DRIVE_FOLDER_ID or My Drive root) using the existing drive.file-scoped OAuth
+  token (same as gsheet_export). `pull_dir` restores files missing/different by
+  content md5; `push_dir` uploads new/changed files (create or update), skipping
+  unchanged. Names are flat Drive names with '/' encoding subpaths; traversal
+  names are rejected.
+- `cash_watcher.py --drive-sync` — pulls `out/` from Drive before a poll and
+  pushes it back after (`--once` and loop mode); sync failures are logged and
+  never fatal, so a Drive hiccup can't kill the watcher.
+- `.github/workflows/cash-watcher.yml` — `*/10` cron (+ workflow_dispatch),
+  checkout ? setup-python 3.11 ? pip install -r requirements.txt +
+  tesseract-ocr ? writes the OAuth files + .env from GitHub secrets ? runs
+  `python cash_watcher.py --drive-sync --once` ? uploads `out/` as a 30-day
+  artifact.
+- `docs/cloud-runner-setup.md` — architecture, host recommendation (Railway
+  recommended / Fly.io alternative; avoid Render free tier — it sleeps), the
+  redshift-api env vars to set on the host, the full GitHub-secret list, and
+  enable steps.
+
+**Host recommendation (user asked "help me pick a host"):** Railway (easiest,
+~$5/mo, always-on, HTTPS) or Fly.io (cheapest always-on, ~$2-5/mo). Render free
+tier sleeps after ~15 min idle — wrong for a scheduled poll. Redshift's public
+endpoint is internet-reachable so no VPC peering is needed; the Serverless
+workgroup must be running when the poll fires (it auto-resumes on connect).
+
+**NOT yet done (needs the user/infra):**
+1. Deploy the redshift-api to the chosen host (env vars in docs/cloud-runner-setup.md).
+2. Add the six GitHub secrets (REDSHIFT_API_URL, REDSHIFT_API_KEY,
+   GOOGLE_OAUTH_CLIENT_JSON, GOOGLE_OAUTH_TOKEN_JSON,
+   GOOGLE_OAUTH_INBOX_TOKEN_JSON, GOOGLE_OAUTH_GMAIL_TOKEN_JSON).
+3. Push `.github/workflows/cash-watcher.yml` to the deployed repo and trigger the
+   first run.
+4. Scope `sop1.watcher.borrowers` for the cloud schedule (empty = all 46, heavy
+   for a 10-min cron).
+
+Tests: tests/test_drive_store.py +4 (folder create/reuse, pull missing/unchanged,
+traversal guard, push new/update/skip). Quality gate: full suite 271 passed,
+ruff clean.
+
+## 2026-09-10 — cloud deploy status: BLOCKED on Redshift network reachability
+
+Progress on the cloud-runner path:
+- **redshift-api deployed to Railway** (project redshift-api-lt, service
+  redshift-api-lt-production, URL https://redshift-api-lt-production.up.railway.app).
+  Added a Dockerfile (python:3.11-slim, honors Railway's $PORT), .dockerignore
+  (excludes .venv/logs/.env/tests) and railway.toml (DOCKERFILE builder +
+  /health healthcheck). Deploy succeeds; `Uvicorn running on 0.0.0.0:8080`.
+- **Auth verified**: `/health` 200 configured:true; API_KEY matches the local
+  `redshift-api/.env` value (SHA-256 confirmed equal).
+- **drive_store + --drive-sync + the GitHub Actions workflow + setup doc** are
+  all in place (see previous entry).
+
+**BLOCKER (needs AWS/infra owner, not code):** `/health/db` from Railway times
+out while the same endpoint works locally. Cause: the Redshift Serverless
+endpoint `workgroup-xlarge.897058370678.us-west-2.redshift-serverless.amazonaws.com`
+now resolves ONLY to the private IP `10.1.56.196` (earlier it resolved to public
+44.254.226.217 during the observed flapping). The local machine reaches it via a
+corporate/VPN route to the VPC; Railway (public internet) cannot route to a
+10.x address.
+
+Options for the owner:
+1. Enable **public accessibility** on the workgroup (AWS Console ?
+   Redshift Serverless ? workgroup-xlarge ? Data access ? Publicly accessible,
+   or `aws redshift-serverless update-workgroup`). Recommended; the endpoint
+   then resolves publicly (like 44.254.x) and Railway connects. Read-only + API
+   key protected, but opening to the internet is a security decision.
+2. cloudflared tunnel from this machine to the local redshift-api (stopgap —
+   reintroduces machine/tunnel dependency).
+3. Run the runner inside the VPC (AWS-hosted runner/EC2), avoiding public
+   exposure entirely.
+
+Until one of these is decided, the GitHub-hosted cloud schedule cannot complete
+a real run; the local watcher keeps working normally.
+
+**Scope decision (user, 11:45): cut-off-date synchronization of the statement side
+is NOT being built.** Rationale: there is no real-time monitoring/cadence mechanism
+in place yet, so the pipeline cannot reliably know when statement data is "as-of";
+enforcing a cut-off alignment on the independent side would be premature. Consequence:
+variance attribution (below) compares the statement-covered window manually, not via
+auto-aligned cut-offs. The tape-side cut-off guard already shipped (hard_stop/backdate)
+stays as-is.

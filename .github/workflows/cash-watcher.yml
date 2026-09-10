@@ -1,0 +1,75 @@
+name: cash-watcher
+
+# SOP 1 loan-tape change-detection watcher, scheduled on a SELF-HOSTED runner.
+#
+# Why self-hosted: the Redshift Serverless endpoint is private (10.x only) and
+# only reachable from this machine's network, so the runner must run where the
+# data is. The runner is installed on this PC (C:\actions-runner, service
+# "GitHubActionsRunner-verifications-watcher"). This workflow is the same
+# scheduled runner the cloud version would use — cron + Actions UI + secrets —
+# it just executes locally.
+#
+# Requirements:
+#   - GitHub secrets: REDSHIFT_API_URL (http://127.0.0.1:8001), REDSHIFT_API_KEY,
+#     GOOGLE_OAUTH_CLIENT_JSON, GOOGLE_OAUTH_TOKEN_JSON,
+#     GOOGLE_OAUTH_INBOX_TOKEN_JSON, GOOGLE_OAUTH_GMAIL_TOKEN_JSON (JSON contents).
+#   - The local redshift-api must be running (auto-started at logon via Task
+#     Scheduler "redshift-api").
+#   - Tesseract is already installed locally (OCR fallback resolves it); no apt.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"        # every 10 minutes
+  workflow_dispatch: {}           # manual "Run workflow" button
+
+concurrency:
+  group: cash-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore Google OAuth files + .env from secrets
+        shell: pwsh
+        env:
+          CLIENT_JSON: ${{ secrets.GOOGLE_OAUTH_CLIENT_JSON }}
+          TOKEN_JSON: ${{ secrets.GOOGLE_OAUTH_TOKEN_JSON }}
+          INBOX_JSON: ${{ secrets.GOOGLE_OAUTH_INBOX_TOKEN_JSON }}
+          GMAIL_JSON: ${{ secrets.GOOGLE_OAUTH_GMAIL_TOKEN_JSON }}
+          API_URL: ${{ secrets.REDSHIFT_API_URL }}
+          API_KEY: ${{ secrets.REDSHIFT_API_KEY }}
+        run: |
+          Set-Content -Path client_secret.json -Value $env:CLIENT_JSON -NoNewline
+          Set-Content -Path google_oauth_token.json -Value $env:TOKEN_JSON -NoNewline
+          Set-Content -Path google_oauth_inbox_token.json -Value $env:INBOX_JSON -NoNewline
+          Set-Content -Path google_oauth_gmail_token.json -Value $env:GMAIL_JSON -NoNewline
+          Set-Content -Path .env -Value "REDSHIFT_API_URL=$env:API_URL"
+          Add-Content -Path .env -Value "REDSHIFT_API_KEY=$env:API_KEY"
+          Add-Content -Path .env -Value "GOOGLE_OAUTH_CLIENT_JSON=client_secret.json"
+          Add-Content -Path .env -Value "GOOGLE_OAUTH_TOKEN_JSON=google_oauth_token.json"
+          Add-Content -Path .env -Value "GOOGLE_OAUTH_INBOX_TOKEN_JSON=google_oauth_inbox_token.json"
+          Add-Content -Path .env -Value "GOOGLE_OAUTH_GMAIL_TOKEN_JSON=google_oauth_gmail_token.json"
+
+      - name: Run watcher (full tape, Drive-synced state)
+        shell: pwsh
+        run: python cash_watcher.py --drive-sync --once
+
+      - name: Upload working papers + audit trail
+        uses: actions/upload-artifact@v4
+        with:
+          name: cash-watcher-out
+          path: out/
+          retention-days: 30

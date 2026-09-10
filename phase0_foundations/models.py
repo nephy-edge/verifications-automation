@@ -8,20 +8,20 @@ all input types; exceptions reference it by a stable key.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass
 class VerificationRun:
     """One end-to-end run of the workflow (A3 step)."""
 
-    id: Optional[str] = None
+    id: str | None = None
     status: str = "running"           # running | done | failed
     inputs: dict[str, Any] = field(default_factory=dict)
     aggregates: dict[str, Any] = field(default_factory=dict)
-    exceptions: list["ExceptionItem"] = field(default_factory=list)
-    started_at: Optional[str] = None
-    finished_at: Optional[str] = None
+    exceptions: list[ExceptionItem] = field(default_factory=list)
+    started_at: str | None = None
+    finished_at: str | None = None
 
 
 @dataclass
@@ -34,8 +34,8 @@ class ExceptionItem:
     description: str = ""
     evidence: list[str] = field(default_factory=list)
     status: str = "pending"   # pending | reviewed | approved | rejected
-    reviewer: Optional[str] = None
-    review_note: Optional[str] = None
+    reviewer: str | None = None
+    review_note: str | None = None
 
 
 @dataclass
@@ -46,4 +46,4 @@ class ReviewAction:
     action: str               # approved | edited | rejected
     reviewer: str
     note: str = ""
-    at: Optional[str] = None
+    at: str | None = None

@@ -8,7 +8,8 @@ to other steps as immutable inputs.
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any
+from collections.abc import Iterable
 
 from phase0_foundations.fx import FXConfig, convert_to_base
 from phase1_ingestion_parsing.ingest import DIR_IN, DIR_OUT

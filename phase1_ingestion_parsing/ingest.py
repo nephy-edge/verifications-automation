@@ -13,11 +13,13 @@ caller) so the workflow never guesses about a file's shape.
 
 from __future__ import annotations
 
-import io
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
+from collections.abc import Sequence
 
 import pandas as pd
+
+from phase0_foundations.config import DEFAULT_LOAN_TAPE_COLUMNS
 
 SHEET_TAPE = "tape"
 SHEET_BANK = "bank"
@@ -56,9 +58,24 @@ LOAN_TAPE_KEY_COLS = {
 
 
 def _parse_float(value: Any) -> float:
-    """Coerce a raw cell value to float, treating None/NaN/'' as 0.0."""
+    """Coerce a raw cell value to float, treating None/NaN/'' as 0.0.
+
+    Some Redshift loan-tape sources store money columns as thousands-separated
+    text (e.g. "6,959,813.28", confirmed live on `exitus.principal`) rather
+    than a plain numeric string. Python's float() rejects embedded commas
+    outright, so before this fix every such value silently became 0.0 --
+    exactly the same class of bug as the fee/penalty singular-vs-plural
+    mismatch fixed 2026-09-03, just triggered by formatting instead of a
+    wrong column name. Strip thousands separators (and surrounding
+    whitespace) before parsing; only ',' is stripped, never '.', so this
+    cannot corrupt a genuine decimal value.
+    """
     if value is None:
         return 0.0
+    if isinstance(value, str):
+        value = value.strip().replace(",", "")
+        if not value:
+            return 0.0
     try:
         f = float(value)
     except (TypeError, ValueError):
@@ -74,19 +91,45 @@ def _first_present_date(row: dict[str, Any], *keys: str) -> str:
     return ""
 
 
-def normalize_loan_tape_row(row: dict[str, Any], *, account_ref: str = "") -> list[dict[str, Any]]:
+def normalize_loan_tape_row(
+    row: dict[str, Any], *, account_ref: str = "", columns: dict[str, str] | None = None,
+    negative_sign: bool = False,
+) -> list[dict[str, Any]]:
     """Derive disbursement + collections events from one per-loan tape row.
 
     Disbursement = principal_amount, dated at begin_date (money lent out).
     Collections = total_loan_amount minus everything still outstanding
     (principal/interest/fees/penalties), dated at closure_date if the loan is
     closed else company_due_date — i.e. the amount actually paid down so far.
+
+    `columns` maps each semantic field above to the row's actual column name
+    (see phase0_foundations.config.LoanTapeColumnsConfig / config.yaml's
+    loan_tape_columns) -- real per-loan tape exports vary in naming by
+    borrower (docs/loan_tape_column_survey.md); omitting `columns` uses the
+    identity mapping (semantic name == column name), i.e. today's assumption.
+
+    `negative_sign` marks a borrower whose money columns use a live
+    negative-sign accounting convention (config.yaml's
+    loan_tape_columns.negative_sign_borrowers, confirmed live per-borrower --
+    see that file's comment). When set, total_loan_amount and each
+    outstanding component are abs()'d instead of floored at 0 -- flooring a
+    systematically-negative column would silently zero out real debt rather
+    than just fix the sign.
     """
-    loan_id = str(row.get("loan_id") or "")
+    cols = columns or DEFAULT_LOAN_TAPE_COLUMNS
+
+    def col(semantic: str) -> str:
+        return cols.get(semantic, semantic)
+
+    def outstanding_component(semantic: str) -> float:
+        v = _parse_float(row.get(col(semantic)))
+        return abs(v) if negative_sign else max(0.0, v)
+
+    loan_id = str(row.get(col("loan_id")) or "")
     out: list[dict[str, Any]] = []
 
-    principal_amount = _parse_float(row.get("principal_amount"))
-    begin_date = _first_present_date(row, "begin_date")
+    principal_amount = _parse_float(row.get(col("principal_amount")))
+    begin_date = _first_present_date(row, col("begin_date"))
     if principal_amount and begin_date:
         out.append(
             {
@@ -96,22 +139,26 @@ def normalize_loan_tape_row(row: dict[str, Any], *, account_ref: str = "") -> li
                 "value_date": begin_date,
                 "amount": abs(principal_amount),
                 "direction": DIR_OUT,
-                "currency": str(row.get("currency") or ""),
+                "currency": str(row.get(col("currency")) or ""),
                 "description": f"disbursement:{loan_id}",
                 "account_ref": account_ref,
                 "confidence": 1.0,
             }
         )
 
-    total_loan_amount = _parse_float(row.get("total_loan_amount"))
+    total_loan_amount = _parse_float(row.get(col("total_loan_amount")))
+    if negative_sign:
+        total_loan_amount = abs(total_loan_amount)
     outstanding = (
-        _parse_float(row.get("principal_outstanding"))
-        + _parse_float(row.get("interest_outstanding"))
-        + _parse_float(row.get("fees_outstanding"))
-        + _parse_float(row.get("penalties_outstanding"))
+        outstanding_component("principal_outstanding")
+        + outstanding_component("interest_outstanding")
+        + outstanding_component("fee_outstanding")
+        + outstanding_component("penalty_outstanding")
     )
     paid_amount = max(0.0, total_loan_amount - outstanding)
-    collection_date = _first_present_date(row, "closure_date", "company_due_date", "begin_date")
+    collection_date = _first_present_date(
+        row, col("closure_date"), col("company_due_date"), col("begin_date")
+    )
     if paid_amount and collection_date:
         out.append(
             {
@@ -121,7 +168,7 @@ def normalize_loan_tape_row(row: dict[str, Any], *, account_ref: str = "") -> li
                 "value_date": collection_date,
                 "amount": paid_amount,
                 "direction": DIR_IN,
-                "currency": str(row.get("currency") or ""),
+                "currency": str(row.get(col("currency")) or ""),
                 "description": f"collections:{loan_id}",
                 "account_ref": account_ref,
                 "confidence": 1.0,

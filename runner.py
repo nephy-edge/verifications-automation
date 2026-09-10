@@ -44,7 +44,7 @@ from phase1_ingestion_parsing.ingest import (  # noqa: E402
 )
 from phase2_verification_engine.assets import verify_asset_existence  # noqa: E402
 from phase2_verification_engine.calculate import calculate_aggregates  # noqa: E402
-from phase2_verification_engine.reconcile import reconcile  # noqa: E402
+from phase2_verification_engine.reconcile import estimate_gateway_fee, reconcile  # noqa: E402
 from phase3_anomaly_reporting.anomaly import detect_anomalies  # noqa: E402
 from phase3_anomaly_reporting.rank import rank_exceptions  # noqa: E402
 from phase3_anomaly_reporting.reporter import build_report  # noqa: E402
@@ -64,11 +64,13 @@ def main() -> int:
     parser.add_argument("--asset-checks", nargs="*", default=[], help="Registry check result file(s) (e.g. vehicle_plate_peru output)")
     parser.add_argument("--reported", default="{}", help='JSON of reported totals, e.g. {"collections":100}')
     parser.add_argument(
-        "--live-fx", action="store_true",
+        "--no-live-fx", action="store_true",
         help=(
-            "Fetch live FX rates (fawazahmed0/currency-api, free, no key) for any non-base "
-            "currency found in the input, falling back to config.yaml's static fx.rates table "
-            "on failure. Off by default so a CLI run stays reproducible given the same inputs."
+            "Disable live FX rate lookup for non-base currencies found in the input. "
+            "ON by default: the runner fetches live rates "
+            "(fawazahmed0/currency-api, free, no key), falling back to config.yaml's "
+            "static fx.rates table on failure. Pass this flag to force a reproducible "
+            "run that never hits the network."
         ),
     )
     parser.add_argument("--out", default="out")
@@ -96,18 +98,18 @@ def main() -> int:
 
         all_rows = tape_rows + ledger_rows + bank_rows
 
-        # SOP 1 FX normalization: only fetched when explicitly requested
-        # (--live-fx) so a plain CLI run stays reproducible given the same
-        # input files. See app/streamlit_app.py's `_run_pipeline` for the
-        # same logic where it's opt-out instead (an interactive UI can show
-        # the fetch result before anyone trusts the numbers).
+        # SOP 1 FX normalization: live rates are fetched by default for every
+        # non-base currency found in the input (same opt-out behavior as
+        # app/streamlit_app.py's `_run_pipeline`). Pass --no-live-fx to skip
+        # the network call and keep a byte-reproducible run against only
+        # config.yaml's static fx.rates table.
         found_currencies = {(r.get("currency") or "").strip().upper() for r in all_rows}
         found_currencies.discard("")
         found_currencies.discard(cfg.fx.base_currency)
 
         effective_fx = cfg.fx
         live_fx_status: str | None = None
-        if found_currencies and args.live_fx:
+        if found_currencies and not args.no_live_fx:
             try:
                 live_rates, as_of = fetch_live_rates(cfg.fx.base_currency, found_currencies)
                 if live_rates:
@@ -149,6 +151,10 @@ def main() -> int:
 
         reported = json.loads(args.reported or "{}")
         recon = reconcile(aggregates, reported, cfg.thresholds, run_id=run_id)
+        gateway_fee = estimate_gateway_fee(reported, aggregates, cfg.thresholds)
+        run.aggregates["estimated_gateway_fee"] = gateway_fee["estimated_gateway_fee"]
+        run.aggregates["estimated_gateway_fee_pct"] = gateway_fee["estimated_gateway_fee_pct"]
+        run.aggregates["within_plausible_gateway_fee_range"] = gateway_fee["within_plausible_gateway_fee_range"]
 
         # Phase 3: anomaly detection + ranking.
         anomalies = detect_anomalies(all_rows, cfg.thresholds, run_id=run_id)

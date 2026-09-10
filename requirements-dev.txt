@@ -1,0 +1,8 @@
+# Developer tooling — installs the runtime deps plus the lint/test gate.
+# `pip install -r requirements-dev.txt` is what a developer should run in the
+# venv; `requirements.txt` alone is the CI/production runtime subset and does
+# NOT include the tools that run `ruff check . && pytest`.
+-r requirements.txt
+
+ruff==0.16.5
+pytest==9.1.1

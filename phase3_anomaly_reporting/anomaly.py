@@ -10,12 +10,22 @@ Red flags encoded from A5:
 - true duplicate transactions (same description, amount, and date)
 - round-dollar amounts that are also material for this portfolio
 - same-day disbursement + collection on the same loan (rapid round-tripping)
-- volume/frequency anomaly (e.g. 10x normal)
+- volume/frequency anomaly (e.g. 10x normal, against the whole portfolio's median)
+- per-account pattern break (e.g. 10x that *account's own* recent trailing
+  average — catches a sudden jump the portfolio-wide check can miss)
+- off-hours transactions (only when a row's date value carries a time)
+- micro-splitting / structuring (many similar-size, same-account, same-day
+  transactions summing to a material total)
+
+Rule kinds intentionally left out: a mismatched-account-name check needs a
+KYC/expected-recipient data source this app doesn't have (see
+docs/Verifications_Checklist.md) -- not built rather than guessed.
 """
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any
+from collections.abc import Iterable
 
 from phase0_foundations.config import Thresholds
 from phase0_foundations.models import ExceptionItem
@@ -24,6 +34,20 @@ from phase0_foundations.models import ExceptionItem
 def _median(rows: list[dict[str, Any]]) -> float:
     amounts = sorted(r.get("amount") or 0.0 for r in rows)
     return amounts[len(amounts) // 2] if amounts else 0.0
+
+
+def _extract_hour(value_date: str) -> int | None:
+    """Pull an hour-of-day (0-23) out of a date value, if it carries a time
+    component at all (e.g. "2024-01-01 23:45:00" / "2024-01-01T23:45:00").
+    Returns None for a bare date ("2024-01-01") -- there's no time to judge
+    off-hours from, so the off-hours rule must never guess one."""
+    import re
+
+    m = re.search(r"[T ](\d{1,2}):\d{2}", str(value_date or ""))
+    if not m:
+        return None
+    hour = int(m.group(1))
+    return hour if 0 <= hour <= 23 else None
 
 
 def _roundness(amount: float) -> float:
@@ -134,6 +158,98 @@ def detect_anomalies(
                         f"median {med:,.2f} ('{r.get('description')}')"
                     ),
                     evidence=[r["key"]] if r.get("key") else [],
+                )
+            )
+
+    # Red flag: per-account pattern break — an amount that dwarfs its own
+    # account's recent trailing average, even when the portfolio-wide median
+    # (the volume-anomaly rule above) isn't elevated enough to catch it. E.g.
+    # an account with 1,000 / 2,000 / 4,000 then a sudden 1,000,000 flags
+    # here even if other accounts in the same run are large enough that the
+    # portfolio median hides it from the global check.
+    by_account: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        acct = str(r.get("account_ref") or "").strip()
+        if acct:
+            by_account.setdefault(acct, []).append(r)
+    for acct, acct_rows in by_account.items():
+        ordered = sorted(acct_rows, key=lambda r: str(r.get("value_date") or ""))
+        for i, r in enumerate(ordered):
+            prior = ordered[:i]
+            if len(prior) < thresholds.sequence_jump_min_window:
+                continue
+            trailing_avg = sum(p.get("amount") or 0.0 for p in prior) / len(prior)
+            amt = r.get("amount") or 0.0
+            if trailing_avg > 0 and amt > trailing_avg * thresholds.sequence_jump_multiple:
+                items.append(
+                    ExceptionItem(
+                        id=f"{run_id}:anom:seqjump:{len(items)}" if run_id else f"anom:seqjump:{len(items)}",
+                        kind="anomaly",
+                        severity=0.75,
+                        description=(
+                            f"Pattern break on account '{acct}': {amt:,.2f} is "
+                            f"{amt / trailing_avg:.1f}x its own trailing average "
+                            f"{trailing_avg:,.2f} (last {len(prior)} txns) ('{r.get('description')}')"
+                        ),
+                        evidence=[r["key"]] if r.get("key") else [],
+                    )
+                )
+
+    # Red flag: off-hours transaction. Only judged when the row's own date
+    # value carries a time component -- a bare date never triggers this.
+    for r in rows:
+        hour = _extract_hour(r.get("value_date"))
+        if hour is None:
+            continue
+        is_off_hours = hour >= thresholds.off_hours_start_hour or hour < thresholds.off_hours_end_hour
+        if is_off_hours:
+            items.append(
+                ExceptionItem(
+                    id=f"{run_id}:anom:offhours:{len(items)}" if run_id else f"anom:offhours:{len(items)}",
+                    kind="anomaly",
+                    severity=0.5,
+                    description=(
+                        f"Off-hours transaction at {hour:02d}:00 (outside "
+                        f"{thresholds.off_hours_start_hour:02d}:00-{thresholds.off_hours_end_hour:02d}:00 "
+                        f"business window): {r.get('amount') or 0.0:,.2f} ('{r.get('description')}')"
+                    ),
+                    evidence=[r["key"]] if r.get("key") else [],
+                )
+            )
+
+    # Red flag: micro-splitting / structuring — several similar-size
+    # transactions on the same account and day, summing to a material total.
+    # A classic pattern for staying under a per-transaction reporting/review
+    # threshold.
+    by_account_day: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for r in rows:
+        acct = str(r.get("account_ref") or "").strip()
+        date = str(r.get("value_date") or "")[:10]  # date portion only
+        if acct and date:
+            by_account_day.setdefault((acct, date), []).append(r)
+    for (acct, date), group in by_account_day.items():
+        if len(group) < thresholds.micro_split_min_count:
+            continue
+        amounts = [g.get("amount") or 0.0 for g in group]
+        group_med = sorted(amounts)[len(amounts) // 2]
+        if group_med <= 0:
+            continue
+        similar = all(
+            abs(a - group_med) <= group_med * thresholds.micro_split_amount_tolerance_pct for a in amounts
+        )
+        total = sum(amounts)
+        is_material = med > 0 and total > med * thresholds.micro_split_materiality_multiple
+        if similar and is_material:
+            items.append(
+                ExceptionItem(
+                    id=f"{run_id}:anom:microsplit:{len(items)}" if run_id else f"anom:microsplit:{len(items)}",
+                    kind="anomaly",
+                    severity=0.85,
+                    description=(
+                        f"Possible structuring on account '{acct}' on {date}: {len(group)} similar-size "
+                        f"transactions (~{group_med:,.2f} each) totaling {total:,.2f}"
+                    ),
+                    evidence=[g["key"] for g in group if g.get("key")],
                 )
             )
 

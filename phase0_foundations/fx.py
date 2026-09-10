@@ -19,7 +19,7 @@ class FXConfig:
     rates: dict[str, float] = field(default_factory=dict)  # {"KES": 0.0067, ...} = units of base_currency per 1 unit of that currency
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any] | None) -> "FXConfig":
+    def from_dict(cls, d: dict[str, Any] | None) -> FXConfig:
         d = d or {}
         return cls(
             base_currency=str(d.get("base_currency") or "USD").strip().upper(),

@@ -57,7 +57,7 @@ def test_fetch_live_rates_raises_fxfetcherror_when_both_mirrors_fail():
     with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("down")):
         try:
             fetch_live_rates("USD", ["KES"])
-            assert False, "expected FXFetchError"
+            raise AssertionError("expected FXFetchError")
         except FXFetchError:
             pass
 

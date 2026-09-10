@@ -1,25 +1,37 @@
 # Deterministic engine — runtime + parsing. Kept minimal, deterministic-first.
-PyYAML>=6.0
+# Exact pins for reproducibility: `pip install -r requirements.txt` is a target
+# (already-installed resolution) so runs behave identically across machines and
+# Streamlit Community Cloud. Bump deliberately and re-run the test suite.
+PyYAML==6.0.3
 
 # PDF parsing / extraction (Phase 1). pypdf merges per-page searchable PDFs
 # produced by ocr.py's ocr_to_searchable_pdf().
-pypdf>=4.0
-pdfplumber>=0.11.0
+pypdf==6.16.1
+pdfplumber==0.11.10
 
 # OCR fallback for scanned/image-only statements (phase1/ocr.py). Also
 # requires the `tesseract` binary itself on the machine (not pip-installable);
 # see .env.example's TESSERACT_CMD. Degrades to the existing placeholder when
 # either is missing — never a hard dependency for the rest of the pipeline.
-pytesseract>=0.3.10
-pypdfium2>=4.0
-pillow>=10.0
+pytesseract==0.3.13
+pypdfium2==5.13.0
+pillow==12.3.0
 
 # Data handling (loan tape, ledger, cash map spreadsheets)
-pandas>=2.0
-openpyxl>=3.1.0   # pandas' .xlsx engine — without it every Excel upload fails
+pandas==3.0.5
+openpyxl==3.1.5   # pandas' .xlsx engine — without it every Excel upload fails
 
 # Diagnostics/optional shared artifacts
-python-dotenv>=1.0.0
+python-dotenv==1.2.3
 
 # Review dashboard (app/streamlit_app.py)
-streamlit>=1.38.0
+streamlit==1.61.1
+
+# Google Sheets export (phase0_foundations/gsheet_export.py) -- creates
+# Sheets under the signed-in user's own Google account (google-auth-oauthlib
+# powers the one-time interactive consent in scripts/google_oauth_setup.py;
+# google-auth handles silent token refresh at runtime).
+google-auth==2.57.0
+google-auth-oauthlib==1.4.1
+google-api-python-client==2.200.0
+python-docx==1.2.0
