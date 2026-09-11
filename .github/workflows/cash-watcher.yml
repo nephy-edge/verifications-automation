@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up workspace venv + dependencies
-        shell: pwsh
+        shell: powershell
         run: |
           python --version
           python -m venv .venv
@@ -41,7 +41,7 @@ jobs:
           .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
       - name: Restore Google OAuth files + .env from secrets
-        shell: pwsh
+        shell: powershell
         env:
           CLIENT_JSON: ${{ secrets.GOOGLE_OAUTH_CLIENT_JSON }}
           TOKEN_JSON: ${{ secrets.GOOGLE_OAUTH_TOKEN_JSON }}
@@ -62,7 +62,7 @@ jobs:
           Add-Content -Path .env -Value "GOOGLE_OAUTH_GMAIL_TOKEN_JSON=google_oauth_gmail_token.json"
 
       - name: Run watcher (full tape, Drive-synced state)
-        shell: pwsh
+        shell: powershell
         run: .\.venv\Scripts\python.exe cash_watcher.py --drive-sync --once
 
       - name: Upload working papers + audit trail
