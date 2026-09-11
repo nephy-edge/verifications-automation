@@ -32,15 +32,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
+      - name: Set up workspace venv + dependencies
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python --version
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
       - name: Restore Google OAuth files + .env from secrets
         shell: pwsh
@@ -65,7 +63,7 @@ jobs:
 
       - name: Run watcher (full tape, Drive-synced state)
         shell: pwsh
-        run: python cash_watcher.py --drive-sync --once
+        run: .\.venv\Scripts\python.exe cash_watcher.py --drive-sync --once
 
       - name: Upload working papers + audit trail
         uses: actions/upload-artifact@v4
