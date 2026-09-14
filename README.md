@@ -20,7 +20,7 @@ verifications-automation/
 ├── config.yaml                    # deterministic thresholds (single source of truth)
 ├── requirements.txt
 ├── .env.example
-├── PROGRESS.md
+├── docs/PROGRESS.md
 └── tests/
 ```
 
@@ -105,7 +105,7 @@ result, not merged into `run.exceptions`:
   independent one, complementing (not replacing) the deterministic
   aggregate reconciliation in the Run tab.
 
-See PROGRESS.md's 2026-08-25 entries for why these are separate tabs rather
+See docs/PROGRESS.md's 2026-08-25 entries for why these are separate tabs rather
 than folded into the Run tab's upload flow, and the 2026-08-26 entry for why
 asset existence and vehicle verification were later merged into one tab.
 
@@ -118,7 +118,7 @@ there even though it isn't on a bare local machine.
 
 ## Deployment (Streamlit Community Cloud)
 
-1. Push this folder as its own repo (see PROGRESS.md's deploy entry for what
+1. Push this folder as its own repo (see docs/PROGRESS.md's deploy entry for what
    was deliberately excluded — real sample files under `samples/`).
 2. On share.streamlit.io: New app → pick the repo → main file path
    `app/streamlit_app.py`.
@@ -136,4 +136,4 @@ there even though it isn't on a bare local machine.
    FastAPI service, not something Streamlit Cloud can reach at
    `127.0.0.1:8001` once this app is no longer running next to it locally.
 
-See `PROGRESS.md` for the live task log.
+See `docs/PROGRESS.md` for the live task log.

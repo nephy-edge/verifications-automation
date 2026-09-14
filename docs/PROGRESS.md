@@ -1361,6 +1361,54 @@ Options for the owner:
 Until one of these is decided, the GitHub-hosted cloud schedule cannot complete
 a real run; the local watcher keeps working normally.
 
+## 2026-09-11 — SELF-HOSTED GitHub Actions runner live (no admin needed for the schedule)
+
+Per user choice, after the AWS-admin blocker (private Redshift endpoint), went
+with a **self-hosted GitHub Actions runner on this machine** — same GitHub
+Actions scheduler the cloud version would use, running where the data is:
+
+- **Runner installed + registered**: `C:\actions-runner` (v2.337.0), registered
+  to `nephy-edge/verifications-automation` as `verifications-watcher` (labels
+  self-hosted/Windows/X64). Currently running as a persistent background process
+  ("Listening for Jobs"). Permanent path: a Windows service
+  `GitHubActionsRunner-verifications-watcher` (RunnerService.exe) — the one
+  admin step (elevated PowerShell New-Service) is still pending; until then the
+  background process is the live runner.
+- **Workflow `cash-watcher.yml`** (`.github/workflows/`) — `*/10` cron +
+  workflow_dispatch; `runs-on: self-hosted`; Windows-safe steps: workspace venv
+  (no actions/setup-python — its registry cleanup fails on non-elevated
+  self-hosted runners), OAuth files + .env rebuilt from GitHub secrets (pwsh),
+  `cash_watcher.py --drive-sync --once`, uploads `out/` artifact.
+- **GitHub secrets set** (6): REDSHIFT_API_URL=http://127.0.0.1:8001,
+  REDSHIFT_API_KEY, GOOGLE_OAUTH_CLIENT_JSON/TOKEN_JSON/INBOX_TOKEN_JSON/
+  GMAIL_TOKEN_JSON (file contents). Values came from local files via stdin,
+  never printed.
+- **Code pushed** to the deployed repo (commit 889f18a + 0be1f6a after rebasing
+  over two remote commits 4858ddc/9b5e4ff — resolved conflicts with the
+  monorepo's authoritative versions).
+- **Drive state seeded** (52 files) so the runner resumes from current state.
+- `config.yaml` borrowers scoped to `[leasy]` for the schedule.
+
+**Verified end-to-end via GitHub Actions (run 34574723559, success):**
+```
+[sync] pulled 52 file(s) from Drive
+[run] leasy -> out\leasy\run_4caf0df68cb5.json (5027 exceptions, independent=True)
+[mail] leasy: working paper emailed to nephy@lendable.io
+[sync] pushed 4 file(s) to Drive
+```
+The forced change (watermark cleared in the Drive-persisted state) triggered a
+full reconcile + email through the scheduler; idempotency confirmed on the
+previous trigger (`[poll] no changes`, no re-email). Transient Redshift outages
+degrade to "no changes" with state preserved, exactly as designed.
+
+**Remaining small steps (optional):**
+1. Install the runner as a Windows service (elevated command) so it survives
+   reboot/logoff without the background process.
+2. Auto-start the local redshift-api at logon (currently started manually).
+3. Restore the local `cash_watcher_state.json` watermark (the forced-cleared one
+   is back in the Drive copy after the successful run — the local file is what
+   the manual local watcher uses).
+
 **Scope decision (user, 11:45): cut-off-date synchronization of the statement side
 is NOT being built.** Rationale: there is no real-time monitoring/cadence mechanism
 in place yet, so the pipeline cannot reliably know when statement data is "as-of";

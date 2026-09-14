@@ -223,7 +223,8 @@ def _loan_tape_summary(
 
     The staging tables return money columns as strings, so they are coerced to
     float here. Blank/absent values count as 0 in the money totals. `status`,
-    `country`, and `days_past_due` drive the cohort and delinquency breakdowns.
+    `country`, `product`, and `days_past_due` drive the cohort and delinquency
+    breakdowns.
 
     `columns` maps each semantic field to this borrower's actual column name
     (see phase0_foundations.config.LoanTapeColumnsConfig / config.yaml's
@@ -301,18 +302,11 @@ def _loan_tape_summary(
         "total_outstanding": float(outstanding.sum()),
         "collected_to_date": float(collected.sum()),
     }
-    for semantic in ("status", "country"):
+    for semantic in ("status", "country", "product"):
         col = _col(semantic)
         if col in df.columns:
             cleaned = df[col].replace("", "(blank)").fillna("(blank)")
             summary[f"by_{semantic}"] = cleaned.value_counts().to_dict()
-    dpd_col = _col("days_past_due")
-    if dpd_col in df.columns:
-        dpd = _num("days_past_due")
-        summary["delinquent_loans"] = int((dpd > 0).sum())
-        summary["n_dpd_30"] = int(((dpd >= 30) & (dpd < 60)).sum())
-        summary["n_dpd_60"] = int(((dpd >= 60) & (dpd < 90)).sum())
-        summary["n_dpd_90"] = int((dpd >= 90).sum())
     return summary
 
 
@@ -362,9 +356,28 @@ def _save_upload(uploaded_file, dest_dir: Path) -> Path:
     return p
 
 
+def _rows_in_period(rows: list[dict], periods: list[str] | None) -> list[dict]:
+    """Canonical rows (tape/ledger/bank/mobile, post-normalization) whose
+    `value_date` falls in one of the selected 'YYYY-MM' buckets (the Run
+    tab's Period filter, Section 1b). A row with no parseable date is
+    dropped rather than assumed in-scope. Cash total is deliberately left
+    alone by callers -- it's a point-in-time balance, not a sum over a
+    date range, so "period" doesn't apply to it the way it does to
+    collections/disbursements."""
+    if not periods:
+        return rows
+    period_set = set(periods)
+    kept = []
+    for r in rows:
+        ts = pd.to_datetime(r.get("value_date"), errors="coerce")
+        if pd.notna(ts) and ts.strftime("%Y-%m") in period_set:
+            kept.append(r)
+    return kept
+
+
 def _run_pipeline(
     tape_files, bank_files, ledger_files, mobile_files, cash_map_files=(), tape_records=None,
-    use_live_fx=True, tape_borrower=None,
+    use_live_fx=True, tape_borrower=None, period_filter: list[str] | None = None,
 ) -> tuple[VerificationRun, Path]:
     run_id = uuid.uuid4().hex[:12]
     run_dir = OUT_ROOT / run_id
@@ -447,6 +460,18 @@ def _run_pipeline(
     ]
     bank_balances: list[float] = [b for b, _ in bank_balance_pairs]
     mobile_rows: list[dict] = [r for s in mobile_statements for r in s["rows"]]
+
+    # Period filter (Section 1b) applies to every transaction-level row --
+    # collections/disbursements are sums over a date range, so narrowing the
+    # range should narrow all four sources consistently. `bank_balance_pairs`
+    # (cash total) is deliberately computed above, from the whole statement,
+    # and left untouched: a closing balance is a point-in-time figure, not a
+    # sum over the period, so there's nothing in it for this filter to narrow.
+    if period_filter:
+        tape_rows = _rows_in_period(tape_rows, period_filter)
+        ledger_rows = _rows_in_period(ledger_rows, period_filter)
+        bank_rows = _rows_in_period(bank_rows, period_filter)
+        mobile_rows = _rows_in_period(mobile_rows, period_filter)
 
     # SOP 1 (bi-weekly cash tracking) FX normalization: try a live rate for
     # every non-blank, non-base currency actually present in this run's data
@@ -594,6 +619,7 @@ def _run_pipeline(
             "cash_map_files": [p.name for p in cash_map_paths],
             "tape_source": taper_src,
             "borrower": borrower,
+            "period_filter": list(period_filter or []),
             **coverage_stats(len(all_rows), population_size),
             "has_tape": has_tape,
             "has_ledger": has_ledger,
@@ -721,10 +747,14 @@ tab_run, tab_assets, tab_review, tab_audit, tab_ask = st.tabs(
 with tab_run:
     st.subheader("1. Upload sources")
 
-    # (widget key, accepted types, help text) per source. A file_uploader's
-    # value lives in st.session_state under its key even on a run where the
-    # widget itself isn't rendered, so switching the dropdown away and back
-    # doesn't lose anything already attached to another source.
+    # (widget key, accepted types, help text) per source. Every uploader is
+    # instantiated on every run (inside an expander, not behind a dropdown
+    # that swaps which one exists) -- a file_uploader widget that goes
+    # un-instantiated for a run has its uploaded files invalidated by
+    # Streamlit's own file manager, which previously surfaced as an
+    # `AttributeError: 'DeletedFile' object has no attribute 'name'` the next
+    # time a source you'd switched away from (in the dropdown this replaced)
+    # was read back out of session_state.
     _UPLOAD_SOURCES: dict[str, tuple[str, list[str], str | None]] = {
         "Loan tape (reported collections/disbursements)": (
             "tape_up", ["csv", "xlsx", "xls"], None,
@@ -744,33 +774,29 @@ with tab_run:
         ),
     }
 
-    upload_choice = st.selectbox(
-        "What do you want to upload?",
-        options=list(_UPLOAD_SOURCES.keys()),
-        key="upload_type_select",
-    )
-    active_key, active_types, active_help = _UPLOAD_SOURCES[upload_choice]
-    st.file_uploader(
-        upload_choice,
-        type=active_types,
-        accept_multiple_files=True,
-        key=active_key,
-        help=active_help,
-    )
+    def _live_uploads(key: str) -> list[Any]:
+        """This key's uploaded files, dropping any `DeletedFile` placeholder
+        Streamlit substitutes for a file whose widget didn't render on a
+        past run (or that the user removed) -- neither has a usable `.name`
+        or `.getvalue()` for downstream ingestion."""
+        return [f for f in (st.session_state.get(key) or []) if hasattr(f, "name")]
 
-    tape_files = st.session_state.get("tape_up")
-    bank_files = st.session_state.get("bank_up")
-    ledger_files = st.session_state.get("ledger_up")
-    mobile_files = st.session_state.get("mobile_up")
-    cash_map_files = st.session_state.get("cashmap_up")
+    for label, (key, types, help_text) in _UPLOAD_SOURCES.items():
+        with st.expander(f"{label} — {len(_live_uploads(key))} attached"):
+            st.file_uploader(
+                label,
+                type=types,
+                accept_multiple_files=True,
+                key=key,
+                help=help_text,
+                label_visibility="collapsed",
+            )
 
-    attached = [
-        f"{label.split(' (')[0]}: {len(st.session_state.get(key) or [])}"
-        for label, (key, _, _) in _UPLOAD_SOURCES.items()
-        if st.session_state.get(key)
-    ]
-    if attached:
-        st.caption("Attached so far — " + " · ".join(attached))
+    tape_files = _live_uploads("tape_up")
+    bank_files = _live_uploads("bank_up")
+    ledger_files = _live_uploads("ledger_up")
+    mobile_files = _live_uploads("mobile_up")
+    cash_map_files = _live_uploads("cashmap_up")
 
     st.subheader("1b. Loan tape from Redshift (alternative to file upload)")
     try:
@@ -823,6 +849,12 @@ with tab_run:
         st.rerun()
 
     loaded_tape_records = st.session_state.get("tape_records")
+    # Set by the Period/Product/Country filters below when a Redshift tape is
+    # loaded; stay empty/None otherwise so "2. Run" (which reads these
+    # unconditionally) always has something to check regardless of which
+    # branch below actually ran.
+    selected_periods: list[str] = []
+    filtered_tape_records: list[dict] | None = None
     if loaded_tape_records:
         tape_borrower = st.session_state.get("tape_borrower", "?")
         tape_filters = st.session_state.get("tape_filters", {})
@@ -841,8 +873,79 @@ with tab_run:
 
         st.divider()
         st.subheader(f"Loan tape — {tape_borrower} summary")
+
+        tape_columns = CFG.loan_tape_columns.resolve(tape_borrower)
+        tape_df = pd.DataFrame(loaded_tape_records)
+
+        def _tape_col(semantic: str) -> str:
+            return tape_columns.get(semantic, semantic)
+
+        # Browsing filters only — narrows what's summarized/displayed below,
+        # not `st.session_state["tape_records"]` itself, so "Run verification"
+        # still reconciles against the full loaded tape regardless of what's
+        # selected here.
+        period_col = _tape_col("begin_date")
+        product_col = _tape_col("product")
+        country_col = _tape_col("country")
+
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            if period_col in tape_df.columns:
+                periods = sorted(
+                    pd.to_datetime(tape_df[period_col], errors="coerce")
+                    .dt.strftime("%Y-%m")
+                    .dropna()
+                    .unique()
+                )
+                selected_periods = st.multiselect(
+                    "Period (begin-date month)", options=periods, key="tape_filter_period"
+                )
+            else:
+                selected_periods = []
+                st.caption(f"No '{period_col}' column to filter by period.")
+        with f2:
+            if product_col in tape_df.columns:
+                products = sorted(tape_df[product_col].dropna().astype(str).unique())
+                selected_products = st.multiselect(
+                    "Product", options=products, key="tape_filter_product"
+                )
+            else:
+                selected_products = []
+                st.caption(f"No '{product_col}' column to filter by product.")
+        with f3:
+            if country_col in tape_df.columns:
+                countries = sorted(tape_df[country_col].dropna().astype(str).unique())
+                selected_countries = st.multiselect(
+                    "Country", options=countries, key="tape_filter_country"
+                )
+            else:
+                selected_countries = []
+                st.caption(f"No '{country_col}' column to filter by country.")
+
+        filtered_df = tape_df
+        if selected_periods:
+            filtered_df = filtered_df[
+                pd.to_datetime(filtered_df[period_col], errors="coerce")
+                .dt.strftime("%Y-%m")
+                .isin(selected_periods)
+            ]
+        if selected_products:
+            filtered_df = filtered_df[filtered_df[product_col].astype(str).isin(selected_products)]
+        if selected_countries:
+            filtered_df = filtered_df[filtered_df[country_col].astype(str).isin(selected_countries)]
+        filtered_records = filtered_df.to_dict("records")
+
+        if selected_periods or selected_products or selected_countries:
+            filtered_tape_records = filtered_records
+            st.caption(
+                f"Filtered to {len(filtered_records):,} of {len(loaded_tape_records):,} loan row(s) "
+                "— the summary/table below AND '2. Run' (reported collections/disbursements) will "
+                "use this filtered set. Bank/mobile/ledger rows are scoped to the selected period(s) "
+                "too, but not product/country (those fields only exist on the loan tape)."
+            )
+
         summary = _loan_tape_summary(
-            loaded_tape_records, CFG.loan_tape_columns.resolve(tape_borrower),
+            filtered_records, tape_columns,
             negative_sign=CFG.loan_tape_columns.uses_negative_sign(tape_borrower),
         )
         if summary:
@@ -858,14 +961,7 @@ with tab_run:
             r2.metric("Interest outstanding", f"{summary['interest_outstanding']:,.0f}")
             r3.metric("Fees outstanding", f"{summary['fee_outstanding']:,.0f}")
 
-            if "delinquent_loans" in summary:
-                d1, d2, d3, d4 = st.columns(4)
-                d1.metric("Delinquent (DPD > 0)", f"{summary['delinquent_loans']:,}")
-                d2.metric("DPD 30–59", f"{summary.get('n_dpd_30', 0):,}")
-                d3.metric("DPD 60–89", f"{summary.get('n_dpd_60', 0):,}")
-                d4.metric("DPD ≥ 90", f"{summary.get('n_dpd_90', 0):,}")
-
-            b1, b2 = st.columns(2)
+            b1, b2, b3 = st.columns(3)
             with b1:
                 st.markdown("**By status**")
                 st.dataframe(
@@ -878,12 +974,21 @@ with tab_run:
                     pd.DataFrame.from_dict(summary.get("by_country", {}), orient="index", columns=["Loans"]),
                     width="stretch",
                 )
+            with b3:
+                st.markdown("**By product**")
+                st.dataframe(
+                    pd.DataFrame.from_dict(summary.get("by_product", {}), orient="index", columns=["Loans"]),
+                    width="stretch",
+                )
+        elif filtered_records == [] and loaded_tape_records:
+            st.info("No loan rows match the selected filters.")
 
         st.markdown("**Full loan tape**")
         st.caption(
-            f"{len(loaded_tape_records):,} row(s) x {len(loaded_tape_records[0])} columns."
+            f"{len(filtered_records):,} row(s) x "
+            f"{len(filtered_records[0]) if filtered_records else len(loaded_tape_records[0])} columns."
         )
-        st.dataframe(pd.DataFrame(loaded_tape_records), width="stretch", height=400)
+        st.dataframe(filtered_df, width="stretch", height=400)
 
         gc1, gc2 = st.columns([3, 1])
         with gc1:
@@ -920,6 +1025,11 @@ with tab_run:
     can_run = bool(
         tape_files or bank_files or ledger_files or mobile_files or loaded_tape_records
     )
+    if filtered_tape_records is not None or selected_periods:
+        st.caption(
+            "Filters from '1b' above are active for this run — totals below reflect the "
+            "filtered slice, not the whole portfolio."
+        )
     if st.button("Run verification", disabled=not can_run, type="primary"):
         with st.spinner("Ingesting, reconciling, and detecting anomalies..."):
             run, run_dir = _run_pipeline(
@@ -928,9 +1038,10 @@ with tab_run:
                 ledger_files or [],
                 mobile_files or [],
                 cash_map_files or [],
-                tape_records=loaded_tape_records,
+                tape_records=filtered_tape_records if filtered_tape_records is not None else loaded_tape_records,
                 use_live_fx=use_live_fx,
                 tape_borrower=st.session_state.get("tape_borrower"),
+                period_filter=selected_periods or None,
             )
         st.session_state["active_run"] = run
         st.session_state["active_run_dir"] = run_dir
@@ -940,6 +1051,13 @@ with tab_run:
     run: VerificationRun | None = st.session_state["active_run"]
     if run is not None:
         st.subheader("3. Results")
+        active_period_filter = (run.inputs or {}).get("period_filter") or []
+        if active_period_filter:
+            st.caption(
+                f"Filtered to period(s) **{', '.join(active_period_filter)}** — collections/"
+                "disbursements below are for this slice, not the whole portfolio. Cash total is "
+                "unaffected (it's a point-in-time balance, not a sum over a range)."
+            )
         with st.expander("What am I looking at?"):
             st.markdown(
                 "Each figure below is one side of a comparison, not a standalone total:\n\n"

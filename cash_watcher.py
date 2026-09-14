@@ -737,6 +737,16 @@ def main() -> int:
                         help="Sync out/ to a Google Drive app folder before and after "
                              "each poll (for ephemeral runners like GitHub Actions: "
                              "restores state from the last run and persists this one)")
+    parser.add_argument("--sign-off", action="store_true",
+                        help="Record a human sign-off for one run's working paper "
+                             "(requires --borrower, --run-id, --signed-by) and exit")
+    parser.add_argument("--show-signoff", action="store_true",
+                        help="Print the sign-off record for one run, if any "
+                             "(requires --borrower, --run-id) and exit")
+    parser.add_argument("--run-id", default=None, help="Run id to sign off / inspect")
+    parser.add_argument("--signed-by", default=None,
+                        help="Name/email of the person signing off the run")
+    parser.add_argument("--note", default="", help="Optional note attached to the sign-off")
     args = parser.parse_args()
 
     # Load the project's .env so REDSHIFT_API_KEY / REDSHIFT_API_URL /
@@ -775,6 +785,51 @@ def main() -> int:
             print(f"[sync] pushed {n} file(s) to Drive")
         except Exception as exc:  # noqa: BLE001
             print(f"[sync] push failed (state stays local): {exc}", file=sys.stderr)
+
+    if args.sign_off or args.show_signoff:
+        from phase0_foundations.signoff import (
+            AlreadySignedOffError,
+            ReportNotFoundError,
+            get_signoff,
+            sign_off_run,
+            verify_signoff,
+        )
+
+        if not args.borrower or len(args.borrower) != 1:
+            print("--sign-off/--show-signoff require exactly one --borrower", file=sys.stderr)
+            return 2
+        if not args.run_id:
+            print("--sign-off/--show-signoff require --run-id", file=sys.stderr)
+            return 2
+        borrower = args.borrower[0]
+
+        sync_pull()
+        if args.show_signoff:
+            record = get_signoff(cfg.out_dir, borrower, args.run_id)
+            if not record:
+                print(f"[signoff] {borrower} run {args.run_id}: not signed off")
+                return 1
+            intact = verify_signoff(cfg.out_dir, borrower, args.run_id)
+            print(f"[signoff] {borrower} run {args.run_id}: signed by {record['signed_by']} "
+                  f"at {record['signed_at']}"
+                  + (f" -- \"{record['note']}\"" if record.get("note") else "")
+                  + (" (report unchanged since signing)" if intact
+                     else " (WARNING: report has changed since signing)"))
+            return 0
+
+        if not args.signed_by:
+            print("--sign-off requires --signed-by", file=sys.stderr)
+            return 2
+        try:
+            record = sign_off_run(cfg.out_dir, cfg.log_path, borrower, args.run_id,
+                                   args.signed_by, note=args.note)
+        except (ReportNotFoundError, AlreadySignedOffError) as exc:
+            print(f"[signoff] {exc}", file=sys.stderr)
+            return 1
+        print(f"[signoff] {borrower} run {record.run_id} signed off by {record.signed_by} "
+              f"at {record.signed_at}")
+        sync_push()
+        return 0
 
     if args.once:
         sync_pull()

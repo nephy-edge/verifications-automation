@@ -457,16 +457,6 @@ fx:
               # on a row but missing from both sources is left unconverted and surfaced
               # as `unmapped_currencies` in the aggregates.
 
-fx:
-  base_currency: USD
-  rates: {}   # {CCY: units of base_currency per 1 unit of CCY}, e.g. {"KES": 0.0067}.
-              # Empty by default -> no conversion applied (rows keep summing as before,
-              # no behavior change). Populate with real, current rates before relying on
-              # this for a live multi-currency run — never fabricate a plausible-looking
-              # rate here (same discipline as vehicle_verify.py's confirmed-only country
-              # contracts). A currency present on a row but missing from this table is
-              # left unconverted and surfaced as `unmapped_currencies` in the aggregates.
-
 llm:
   parse_temperature: 0.3
   anomaly_temperature: 0.5

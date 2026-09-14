@@ -162,6 +162,15 @@ DEFAULT_LOAN_TAPE_COLUMNS: dict[str, str] = {
     "currency": "currency",
     "status": "status",
     "country": "country",
+    # Unlike the rest of this table, "product" has not been surveyed against
+    # the real dbt_source tables the way docs/loan_tape_column_survey.md did
+    # for the other fields -- real per-borrower names vary widely (product,
+    # product_type, loan_product, product_group, producttype, ...). Add
+    # confirmed per-borrower overrides to config.yaml's loan_tape_columns
+    # as they're identified; until then this default silently finds nothing
+    # for most borrowers (by_product/product filtering degrades to "(blank)"
+    # rather than erroring).
+    "product": "product",
     "days_past_due": "days_past_due",
 }
 
