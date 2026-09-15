@@ -1344,14 +1344,6 @@ with tab_run:
 # ------------------------------------------- Asset & vehicle verification
 with tab_assets:
     st.subheader("Asset & vehicle verification")
-    with st.expander("What does this check do?"):
-        st.caption(
-            "Independent of the Run tab — a separate reported-vs-independent comparison, not "
-            "combined into the tape/bank/mobile reconciliation. Reported side: whatever the "
-            "borrower's plates, and optionally who they should be registered to, are on file. "
-            "Independent side: a live registry check on each plate against a registry API "
-            "(Verifik; mock data until `VERIFIK_TOKEN` is set)."
-        )
 
     country_code = st.selectbox(
         "Country (for registry lookups)",
