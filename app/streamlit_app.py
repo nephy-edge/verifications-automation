@@ -40,7 +40,7 @@ from phase0_foundations.metrics import (
     lead_times,
 )
 from phase0_foundations.models import ExceptionItem, VerificationRun
-from phase1_ingestion_parsing.assets import load_registry_results, suggest_column
+from phase1_ingestion_parsing.assets import suggest_column
 from phase1_ingestion_parsing.vehicle_verify import (
     CANONICAL_FIELDS,
     COUNTRY_CONFIG,
@@ -1349,9 +1349,8 @@ with tab_assets:
             "Independent of the Run tab — a separate reported-vs-independent comparison, not "
             "combined into the tape/bank/mobile reconciliation. Reported side: whatever the "
             "borrower's plates, and optionally who they should be registered to, are on file. "
-            "Independent side: a registry check on each plate — by default looked up live "
-            "against a registry API (Verifik; mock data until `VERIFIK_TOKEN` is set), or "
-            "supplied as an already-run registry-check file if you have one on hand."
+            "Independent side: a live registry check on each plate against a registry API "
+            "(Verifik; mock data until `VERIFIK_TOKEN` is set)."
         )
 
     country_code = st.selectbox(
@@ -1501,25 +1500,10 @@ with tab_assets:
                     optional=True,
                 )
 
-        registry_source = st.radio(
-            "Registry data source",
-            ["Live lookup (recommended)", "Upload a pre-run registry-check file"],
-            horizontal=True,
-            key="assetv_registry_source",
+        st.caption(
+            f"Each plate will be looked up live against {asset_cfg.name}'s registry when "
+            "you run verification below."
         )
-        asset_check_files = None
-        if registry_source == "Upload a pre-run registry-check file":
-            asset_check_files = st.file_uploader(
-                "Registry check results (independent evidence)",
-                type=["csv", "xlsx", "xls"],
-                accept_multiple_files=True,
-                key="assetv_checks_up",
-            )
-        else:
-            st.caption(
-                f"Each plate will be looked up live against {asset_cfg.name}'s registry when "
-                "you run verification below."
-            )
 
         run_disabled = uploaded_df is None or not plate_col
         if st.button("Run asset verification", disabled=run_disabled, type="primary", key="assetv_bulk_run"):
@@ -1537,34 +1521,29 @@ with tab_assets:
                     }
                 )
 
-            asset_dir = OUT_ROOT / "_asset_uploads"
-            if registry_source == "Upload a pre-run registry-check file":
-                asset_check_paths = [_save_upload(f, asset_dir) for f in (asset_check_files or [])]
-                registry_results = load_registry_results(asset_check_paths)
-            else:
-                client = make_client(CFG)
-                registry_results = {}
-                with st.spinner(
-                    f"Looking up {len(expected_assets)} plate(s) against {asset_cfg.name}'s registry..."
-                ):
-                    for a in expected_assets:
-                        plate = a["plate"]
-                        try:
-                            result = client.lookup(country_code, plate, asset_extra_inputs or None)
-                            status = result.get("status") or (
-                                "Found" if result.get("brand") or result.get("owner") else "No data"
-                            )
-                        except Exception as e:
-                            result = {}
-                            status = f"Error: {str(e)[:60]}"
-                        registry_results[plate] = {
-                            "plate": plate,
-                            "status": status,
-                            "propietario": result.get("owner", ""),
-                            "marca": result.get("brand", ""),
-                            "modelo": result.get("model", ""),
-                            "verified_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        }
+            client = make_client(CFG)
+            registry_results = {}
+            with st.spinner(
+                f"Looking up {len(expected_assets)} plate(s) against {asset_cfg.name}'s registry..."
+            ):
+                for a in expected_assets:
+                    plate = a["plate"]
+                    try:
+                        result = client.lookup(country_code, plate, asset_extra_inputs or None)
+                        status = result.get("status") or (
+                            "Found" if result.get("brand") or result.get("owner") else "No data"
+                        )
+                    except Exception as e:
+                        result = {}
+                        status = f"Error: {str(e)[:60]}"
+                    registry_results[plate] = {
+                        "plate": plate,
+                        "status": status,
+                        "propietario": result.get("owner", ""),
+                        "marca": result.get("brand", ""),
+                        "modelo": result.get("model", ""),
+                        "verified_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
 
             asset_exceptions = verify_asset_existence(expected_assets, registry_results)
             summaries = []
