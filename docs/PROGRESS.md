@@ -1416,3 +1416,14 @@ enforcing a cut-off alignment on the independent side would be premature. Conseq
 variance attribution (below) compares the statement-covered window manually, not via
 auto-aligned cut-offs. The tape-side cut-off guard already shipped (hard_stop/backdate)
 stays as-is.
+
+## 2026-09-15 — Transaction Matching tab: scanned numbered-table statements now recover real column names
+
+Per user picking this from the Part-1 gap list ("Scanned numbered-table OCR recovery for the Transaction Matching tab"). Closes the residual gap logged 2026-09-01: `extract_pdf_table_rows()` (the Transaction Matching tab's column-picker source) recovered real transaction ROWS from a scan (via `extract_pdf`'s canonical fallback) but only ever exposed the 5 generic columns (`Date/Description/Amount/Direction/Currency`) — so you couldn't pick the file's real reference column (e.g. `TRANSACTION CODE`) to match on.
+
+**Change** (`phase1_ingestion_parsing/extract.py`):
+- New `_extract_positioned_table_rows(path, account_ref)` — recovers numbered-table statements' real column names (`#/DATE/NARRATION/DEBIT/CREDIT/BALANCE`) from the *word coordinates*, reusing the already-tested `_table_header_columns`/`_map_line_to_columns`/`_is_noise_line` (the same coordinate logic `_scan_numbered_table` uses). A blank-text scan is OCR'd into a searchable PDF via the existing `ocr_to_searchable_pdf`, then the coordinate mapper runs against its positioned text layer; a PDF that already has a text layer uses the native coordinates directly (no OCR cost). Temp file cleaned in `finally`. Returns `None` cleanly when the layout isn't numbered-table or OCR is unusable, so callers fall through unchanged.
+- `extract_pdf_table_rows()` gained a third fallback tier before the canonical 5-generic-column fallback: ruling-line table ? positioned/OCR coordinate path ? canonical.
+- Added a cross-reference comment in `_extract_positioned_table_rows`'s row/continuation loop pointing at `_scan_numbered_table`'s equivalent logic (a /review uncommitted pass flagged the two as near-duplicates with drift risk; chose the cheap comment over refactoring the validated canonical parser).
+
+**Verified**: 3 new tests in `tests/test_extract.py` — scan?OCR recovers real columns + two rows, native text layer recovers real columns WITHOUT calling OCR (`mock_ocr.assert_not_called`), and a no-OCR scan falls cleanly to canonical (never crashes/empty-header). Full suite 266 ? **269 passed**, ruff clean. Change is in the working tree (the folder syncs to the deployed repo separately; not pushed yet).

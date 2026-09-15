@@ -497,6 +497,123 @@ def test_extract_pdf_table_rows_falls_back_to_canonical_when_no_real_table_found
     assert rows == [{"Date": "2026-06-02", "Description": "Coffee", "Amount": 5.0, "Direction": "out", "Currency": "USD"}]
 
 
+def test_extract_pdf_table_rows_recovers_real_columns_from_a_scan_via_ocr(tmp_path):
+    """A scanned numbered-table statement (blank text layer, no ruling-line
+    table) must recover the file's REAL column names — `DATE/NARRATION/DEBIT/
+    CREDIT/BALANCE` — via the OCR searchable-PDF + coordinate path, instead of
+    collapsing to the 5-generic-column canonical fallback. This is the gap the
+    2026-09-01 PROGRESS entry flagged: a scan reached the Transaction Matching
+    tab's column picker with only generic columns, so you couldn't pick e.g.
+    a real transaction-code column to match on."""
+    import phase1_ingestion_parsing.extract as ext
+    fake_pdf = tmp_path / "scan.pdf"
+    fake_pdf.write_bytes(b"%PDF-fake")
+
+    # Simulate the raw word-lines the coordinate mapper would see: a header
+    # line and one transaction line, with tokens already assigned to columns.
+    header_cols = [("#", 0.0, 10.0), ("DATE", 10.0, 40.0), ("NARRATION", 40.0, 90.0),
+                   ("DEBIT", 90.0, 130.0), ("CREDIT", 130.0, 170.0), ("BALANCE", 170.0, float("inf"))]
+    header_line = {"cols": header_cols, "is_header": True}
+    data_line = {"cols": header_cols,
+                 "tokens": {"#": ["1"], "DATE": ["Mar", "4,", "2026"], "NARRATION": ["Coffee"],
+                            "DEBIT": [], "CREDIT": ["5.00"], "BALANCE": ["105.00"]}}
+    pending_line = {"cols": header_cols,
+                    "tokens": {"#": ["2"], "DATE": ["Mar", "5,", "2026"], "NARRATION": ["Transfer"],
+                               "DEBIT": ["1.00"], "CREDIT": [], "BALANCE": ["104.00"]}}
+
+    def fake_header_columns(line):
+        # Mirrors the real `_table_header_columns`: only the header line returns
+        # column ranges; data/continuation lines return None.
+        return line["cols"] if line.get("is_header") else None
+
+    def fake_map_line_to_columns(line, columns):
+        return line["tokens"]
+
+    fake_pdf_obj = MagicMock()
+    fake_pdf_obj.pages = [MagicMock()]  # `_page_lines` is mocked, so pages just needs to iterate once
+    fake_pdf_obj.__enter__.return_value = fake_pdf_obj
+    fake_pdf_obj.__exit__.return_value = False
+
+    with patch.object(ext, "extract_pdf_text", return_value=""), patch.object(
+        ext, "ocr_to_searchable_pdf", return_value=b"%PDF-searchable"
+    ), patch("phase1_ingestion_parsing.extract.pdfplumber.open", return_value=fake_pdf_obj), patch.object(
+        ext, "_page_lines", return_value=[header_line, data_line, pending_line]
+    ), patch.object(ext, "_is_noise_line", return_value=False), patch.object(
+        ext, "_table_header_columns", side_effect=fake_header_columns), patch.object(
+        ext, "_map_line_to_columns", side_effect=fake_map_line_to_columns
+    ):
+        rows, columns = extract_pdf_table_rows(fake_pdf, account_ref="acct")
+
+    assert columns == ["#", "DATE", "NARRATION", "DEBIT", "CREDIT", "BALANCE"]
+    # Two real transaction rows, each keyed by the file's own column names.
+    assert rows[0]["DATE"] == "Mar 4, 2026"
+    assert rows[0]["NARRATION"] == "Coffee"
+    assert rows[0]["CREDIT"] == "5.00"
+    assert rows[0]["DEBIT"] == ""
+    assert rows[1]["DATE"] == "Mar 5, 2026"
+    assert rows[1]["NARRATION"] == "Transfer"
+    assert rows[1]["DEBIT"] == "1.00"
+
+
+def test_extract_pdf_table_rows_uses_native_coordinates_not_ocr_when_text_layer_exists(tmp_path):
+    """A numbered-table PDF that ALREADY has a text layer (but no ruling-line
+    table — so `extract_tables()` finds nothing) must recover real columns from
+    the native coordinates WITHOUT paying the OCR cost."""
+    import phase1_ingestion_parsing.extract as ext
+    fake_pdf = tmp_path / "native.pdf"
+    fake_pdf.write_bytes(b"%PDF-fake")
+
+    header_cols = [("#", 0.0, 10.0), ("DATE", 10.0, 40.0), ("NARRATION", 40.0, 90.0),
+                   ("DEBIT", 90.0, 130.0), ("CREDIT", 130.0, 170.0), ("BALANCE", 170.0, float("inf"))]
+    header_line = {"cols": header_cols, "is_header": True}
+    data_line = {"cols": header_cols,
+                 "tokens": {"#": ["7"], "DATE": ["Jun", "2"], "NARRATION": ["Salary"],
+                            "DEBIT": [], "CREDIT": ["1,500.00"], "BALANCE": ["2,500.00"]}}
+
+    fake_pdf_obj = MagicMock()
+    fake_pdf_obj.pages = [MagicMock()]  # `_page_lines` is mocked, so pages just needs to iterate once
+    fake_pdf_obj.__enter__.return_value = fake_pdf_obj
+    fake_pdf_obj.__exit__.return_value = False
+
+    with patch.object(ext, "extract_pdf_text", return_value="SOME NATIVE TEXT LAYER\n# DATE NARRATION..."), patch.object(
+        ext, "ocr_to_searchable_pdf"
+    ) as mock_ocr, patch("phase1_ingestion_parsing.extract.pdfplumber.open", return_value=fake_pdf_obj), patch.object(
+        ext, "_page_lines", return_value=[header_line, data_line]
+    ), patch.object(ext, "_is_noise_line", return_value=False), patch.object(
+        ext, "_table_header_columns",
+        side_effect=lambda line: line["cols"] if line.get("is_header") else None
+    ), patch.object(
+        ext, "_map_line_to_columns", side_effect=lambda line, c: line["tokens"]
+    ):
+        rows, columns = extract_pdf_table_rows(fake_pdf, account_ref="acct")
+
+    mock_ocr.assert_not_called()  # native text layer -> OCR must NOT run
+    assert columns == ["#", "DATE", "NARRATION", "DEBIT", "CREDIT", "BALANCE"]
+    assert rows[0]["CREDIT"] == "1,500.00"
+
+
+def test_extract_positioned_table_rows_returns_none_when_scan_ocr_unavailable(tmp_path):
+    """A scan with no usable OCR (e.g. tesseract missing) must fall through to
+    the canonical fallback, not crash or return empty-with-header."""
+    import phase1_ingestion_parsing.extract as ext
+    fake_pdf = tmp_path / "scan_no_ocr.pdf"
+    fake_pdf.write_bytes(b"%PDF-fake")
+
+    fake_pdf_obj = MagicMock()
+    fake_pdf_obj.pages = [MagicMock()]
+    fake_pdf_obj.__enter__.return_value = fake_pdf_obj
+    fake_pdf_obj.__exit__.return_value = False
+
+    with patch.object(ext, "extract_pdf_text", return_value=""), patch.object(
+        ext, "ocr_to_searchable_pdf", return_value=None
+    ), patch("phase1_ingestion_parsing.extract.pdfplumber.open", return_value=fake_pdf_obj):
+        rows, columns = extract_pdf_table_rows(fake_pdf, account_ref="acct")
+
+    # Falls all the way to canonical (which itself degrades to placeholder
+    # rows via extract_pdf's own no-OCR path).
+    assert columns == ["Date", "Description", "Amount", "Direction", "Currency"]
+
+
 def test_numbered_table_does_not_parse_monthly_summary_or_totals_lines():
     """The page-1 'DATE TOTAL DEBITS TOTAL CREDITS BALANCE' monthly summary and
     the 'Available balance ... Total credits' totals block must not be mistaken

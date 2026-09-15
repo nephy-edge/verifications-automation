@@ -892,10 +892,14 @@ def extract_pdf_table_rows(path: str | Path, account_ref: str = "") -> tuple[lis
     Tries pdfplumber's own table detection first (real ruling-line tables;
     the header row is identified with the same keyword heuristic
     `ingest.py` uses for an Excel export's title-row offset), concatenating
-    tables across pages that share that header. Falls back to `extract_pdf`'s
-    validated canonical rows — relabeled to generic display columns — when no
-    real table is found (a flat-text layout, or OCR'd text), reusing proven
-    parsing rather than a second raw one for that case.
+    tables across pages that share that header. When no real ruling-line
+    table is found, tries the numbered-narration layout's *coordinate* mapper
+    (`_extract_positioned_table_rows`) — which survives a scan via its OCR
+    searchable-PDF intermediate and still yields the file's real column names.
+    Only as a last resort falls back to `extract_pdf`'s validated canonical
+    rows — relabeled to generic display columns (a flat-text layout, neither
+    a real table nor the numbered layout) — reusing proven parsing rather than
+    a second raw one for that case.
     """
     if pdfplumber is None or not Path(path).exists():
         return _canonical_as_table_rows(path, account_ref)
@@ -934,7 +938,120 @@ def extract_pdf_table_rows(path: str | Path, account_ref: str = "") -> tuple[lis
 
     if header and rows:
         return rows, header
+
+    # No ruling-line table: a scanned numbered-table statement (or a native
+    # numbered-table PDF without ruling lines). Recover the file's real columns
+    # from the word coordinates via OCR when needed.
+    positioned = _extract_positioned_table_rows(path, account_ref)
+    if positioned is not None:
+        return positioned
     return _canonical_as_table_rows(path, account_ref)
+
+
+def _extract_positioned_table_rows(path: str | Path, account_ref: str) -> tuple[list[dict[str, Any]], list[str]] | None:
+    """Raw, real-column name extraction for the numbered-narration layout,
+    read from the *word coordinates* instead of pdfplumber's ruling-line
+    table detector — the one path that survives a scan.
+
+    `extract_pdf_table_rows`'s primary path (`page.extract_tables()`) needs
+    real vector ruling lines, which a scanned statement never has (its
+    content is just a rendered page image). But the numbered-table layout
+    (`# DATE NARRATION DEBIT CREDIT BALANCE`) carries its column structure in
+    the header words' x-positions, exactly what `_table_header_columns` /
+    `_map_line_to_columns` recover — the same validated coordinate logic
+    `_scan_numbered_table` uses. This builds raw row dicts keyed by those
+    real header names (`DATE`, `NARRATION`, `DEBIT`, `CREDIT`, `BALANCE`) so
+    the Transaction Matching tab's column picker can offer them.
+
+    Handles both cases a scan (or a no-ruling-line native PDF) needs:
+    - a PDF with no text layer (a genuine scan) is OCR'd into a searchable
+      PDF, then the coordinate mapper runs against its positioned text layer;
+    - a PDF with a text layer just uses the native coordinates directly (no
+      OCR cost).
+
+    Returns (rows, header) or None when the statement doesn't present the
+    numbered-table header, or OCR isn't usable for a scan — so the caller can
+    fall through to `_canonical_as_table_rows` exactly as before. Rows keep
+    the header words verbatim as columns (never canonicalized).
+    """
+    if pdfplumber is None or not Path(path).exists():
+        return None
+
+    text = extract_pdf_text(path)
+    tmp: str | None = None
+    try:
+        if text.strip():
+            pdf_path = str(path)
+        else:
+            searchable = ocr_to_searchable_pdf(Path(path).read_bytes())
+            if searchable is None:
+                return None
+            handle = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            handle.write(searchable)
+            handle.close()
+            tmp = handle.name
+            pdf_path = tmp
+
+        with pdfplumber.open(pdf_path) as pdf:
+            pages_lines = [_page_lines(p) for p in pdf.pages]
+
+        header_columns: list[tuple[str, float, float]] | None = None
+        raw_rows: list[dict[str, Any]] = []
+        pending: dict[str, list[str]] | None = None
+        prefix: list[str] = []
+
+        def commit() -> None:
+            nonlocal pending
+            if pending is not None:
+                raw_rows.append({k: " ".join(v).strip() for k, v in pending.items()})
+                pending = None
+
+        for page_lines in pages_lines:
+            for line in page_lines:
+                if _is_noise_line(line):
+                    commit()
+                    prefix = []
+                    continue
+                cols = _table_header_columns(line)
+                if cols is not None:
+                    header_columns = cols
+                    commit()
+                    prefix = []
+                    continue
+                if header_columns is None:
+                    continue
+                tokens = _map_line_to_columns(line, header_columns)
+                hash_tok = "".join(tokens["#"])
+                # NOTE: this row/continuation assembly mirrors `_scan_numbered_table`'s
+                # loop (row-number + date gate, pending/prefix narration merge). If the
+                # parse rules there change (a numbered line with no DATE is a narration
+                # continuation, not a transaction), mirror the change here too.
+                if _ROW_NUM_RE.match(hash_tok) and "".join(tokens["DATE"]):
+                    commit()
+                    narration = " ".join(prefix + tokens["NARRATION"]).strip()
+                    prefix = []
+                    pending = {name: [] for name, _, _ in header_columns}
+                    pending["#"] = [hash_tok]
+                    pending["DATE"] = list(tokens["DATE"])
+                    pending["NARRATION"] = [narration]
+                    for col in ("DEBIT", "CREDIT", "BALANCE"):
+                        pending[col] = [t for t in tokens[col] if t]
+                else:
+                    narration = " ".join(tokens["NARRATION"]).strip()
+                    if narration:
+                        if pending is not None:
+                            pending["NARRATION"].append(narration)
+                        else:
+                            prefix.append(narration)
+        commit()
+
+        if header_columns is None or not raw_rows:
+            return None
+        header = [name for name, _, _ in header_columns]
+        return raw_rows, header
+    finally:
+        if tmp is not None:
+            Path(tmp).unlink(missing_ok=True)
 
 
 def assess_confidence(rows: list[dict[str, Any]], floor: float) -> list[dict[str, Any]]:
