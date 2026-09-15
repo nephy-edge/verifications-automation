@@ -136,19 +136,32 @@ st.html(
 def _bootstrap_google_oauth_from_secrets() -> None:
     """On Streamlit Community Cloud there's no local OAuth token file --
     `google_oauth_token.json` is gitignored, and Streamlit secrets are
-    strings, not files -- so materialize it from `st.secrets` on first run,
-    the same secrets-to-file pattern `cash-watcher.yml` already uses for
-    GitHub Actions. No-op wherever the file already exists (local dev, or a
-    later rerun in the same deployment)."""
-    path = os.environ.get("GOOGLE_OAUTH_TOKEN_JSON", "google_oauth_token.json")
+    strings, not files -- so materialize it from a `GOOGLE_OAUTH_TOKEN_CONTENT`
+    Streamlit secret on first run, the same secrets-to-file pattern
+    `cash-watcher.yml` already uses for GitHub Actions.
+
+    Deliberately does NOT use the name `GOOGLE_OAUTH_TOKEN_JSON`: Streamlit
+    Cloud injects every secret into `os.environ` under its own name too,
+    which collides with `gsheet_export._token_path()`'s existing convention
+    of treating that env var as a *path override*, not file content --
+    confirmed live in production: setting a same-named secret made
+    `_token_path()` return the raw JSON blob as a "path" and crash the whole
+    app on load with `OSError: [Errno 36] File name too long`. The path
+    written here is hardcoded to the same default for the same reason: never
+    derive it from an env var a Streamlit secret could shadow.
+
+    Best-effort and silent on any failure by design -- a broken/missing
+    secret here must degrade to "Drive features don't work" (the existing
+    behavior before this bootstrap existed), never crash app startup."""
+    path = "google_oauth_token.json"
     if os.path.exists(path):
         return
     try:
-        value = st.secrets.get("GOOGLE_OAUTH_TOKEN_JSON")
-    except Exception:  # noqa: BLE001 - no secrets.toml at all locally is fine
-        return
-    if value:
-        Path(path).write_text(value, encoding="utf-8")
+        value = st.secrets.get("GOOGLE_OAUTH_TOKEN_CONTENT")
+        if value:
+            Path(path).write_text(value, encoding="utf-8")
+    except Exception:  # noqa: BLE001 - must never be able to crash app startup
+        pass
 
 
 _bootstrap_google_oauth_from_secrets()
