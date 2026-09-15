@@ -342,9 +342,30 @@ sop1:
     run_on_change: true            # re-run the full pipeline when a change is detected
     # Target borrowers to watch. Empty list = watch every borrower the API
     # exposes (from /borrowers). Only genuine change moves a borrower forward.
-    # Scoped to leasy for the scheduled runs (all 46 borrowers would be too
-    # heavy for a 10-minute cron).
-    borrowers: [leasy]
+    # Scoped to a small, run-weight-safe set for the scheduled runs: each
+    # borrower in this list has its FULL tape fetched once per poll, so the
+    # per-poll load on the local redshift-api + Redshift grows linearly with
+    # the list length (a heavy full-sweep caused transient timeouts/500s in
+    # the 2026-09-08 audit -- see docs/loan_tape_field_population_audit.md).
+    #
+    # Selection rule (checked against the code, not just docs): a borrower is
+    # a useful watcher target only if `normalize_loan_tape_row` (ingest.py)
+    # actually derives events from its mapped columns -- i.e. it maps BOTH a
+    # `principal_amount` (disbursement) AND a `total_loan_amount` (collections)
+    # column in `loan_tape_columns` below. Borrowers with no money mapping
+    # would still pass change-detection (row-count/content hash) but every
+    # change-triggered run would produce an empty aggregate -- a meaningless
+    # working paper. `leasy` and `credismart` are the two whose config maps
+    # both sides completely, so both events are produced.
+    #
+    # Deliberately NOT watched: metafin/payjoy*/advance (money columns
+    # unmapped or partial -- no valid collections event), the 6 persistently
+    # 0-row borrowers (mkopa, amartha2, amartha_full, amartha_full_portfolio,
+    # validus_id_full, validus_id_lendable), and borrowers still awaiting a
+    # business call on ambiguous columns (amartha*, koinworks, moladin,
+    # lhoopa, sary, validus_id*). Revert to [leasy] if the added load is too
+    # heavy.
+    borrowers: [leasy, credismart]
     # Cut-off guard: if the tape's latest begin_date is *after* this date
     # (YYYY-MM-DD) when a change is detected, treat it as a post-cut-off
     # update. "hard_stop" refuses to run (flags) vs "backdate" re-runs but

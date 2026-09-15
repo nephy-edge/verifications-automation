@@ -1,5 +1,26 @@
 # Cloud runner setup — scheduled loan-tape watcher on GitHub Actions
 
+> **Status (2026-09-14):** the Redshift Serverless endpoint currently resolves
+> only to a private VPC IP (see `docs/PROGRESS.md`'s 2026-09-10/11 entries), so
+> the hosted-runner path below (Steps 1–4) is blocked until an AWS/infra owner
+> makes the workgroup publicly accessible. The watcher currently runs instead
+> via a **self-hosted** GitHub Actions runner on a machine with VPN/corporate
+> access to the VPC (`cash-watcher.yml`'s `runs-on: self-hosted`), which needs
+> none of this — it talks to `redshift-api` on `127.0.0.1:8001` directly.
+>
+> Separately, the **Streamlit Community Cloud app** (not the watcher) also
+> needs a reachable `redshift-api` for its "Loan tape from Redshift" dropdown,
+> and runs on Streamlit's infra, not this machine. As a stopgap, a
+> `cloudflared` **quick tunnel** (`cloudflared tunnel --url
+> http://127.0.0.1:8001`, no Cloudflare account needed) can expose the local
+> `redshift-api` publicly: set the app's `REDSHIFT_API_URL` secret (Streamlit
+> Cloud → app → Settings → Secrets) to the printed `https://*.trycloudflare.com`
+> URL and reboot the app. The URL is random and changes every time the tunnel
+> restarts — it only survives as long as the tunnel process and this machine
+> stay up, so re-check it if the dropdown starts failing again. A **named**
+> tunnel (`cloudflared tunnel login` against your own Cloudflare account +
+> domain) would give a stable URL instead of this stopgap.
+
 The SOP 1 watcher (`cash_watcher.py`) scheduled via GitHub Actions on a hosted
 (ephemeral) runner. Two things make this different from a local Task Scheduler
 run:

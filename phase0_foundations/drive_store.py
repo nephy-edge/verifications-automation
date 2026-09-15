@@ -18,15 +18,18 @@ watcher treats a sync failure as logged-and-continue, never fatal.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaInMemoryUpload
 
 from phase0_foundations.gsheet_export import get_drive_service
 
 _FOLDER_NAME = "cash-watcher-state"
 _IGNORE = {"cash_watcher_state.json.tmp"}
+_TUNNEL_URL_FILE = "redshift_tunnel_url.json"
 
 
 class DriveStoreError(RuntimeError):
@@ -124,3 +127,50 @@ def push_dir(out_root: str | Path) -> int:
             ).execute()
         pushed += 1
     return pushed
+
+
+def push_tunnel_url(url: str) -> None:
+    """Publish the current public address of the local redshift-api (e.g. a
+    cloudflared quick-tunnel hostname, which changes every time the tunnel
+    restarts) to the same Drive folder used for watcher state.
+
+    This exists so a reader with no way to reach this machine directly -- the
+    Streamlit Community Cloud deployment -- can look up the *current* address
+    at runtime (see `fetch_tunnel_url`) instead of a hardcoded secret that
+    goes stale on every tunnel rotation. Raises DriveStoreError on auth/API
+    failure -- callers publishing this (a watchdog loop) should log and
+    retry, not crash.
+    """
+    service = get_drive_service()
+    folder = _ensure_sync_folder(service)
+    remote = {f["name"]: f for f in _list_files(service, folder)}
+    payload = json.dumps(
+        {"url": url, "updated_at": datetime.now(timezone.utc).isoformat()}
+    ).encode("utf-8")
+    media = MediaInMemoryUpload(payload, mimetype="application/json")
+    existing = remote.get(_TUNNEL_URL_FILE)
+    if existing:
+        service.files().update(fileId=existing["id"], media_body=media).execute()
+    else:
+        service.files().create(
+            body={"name": _TUNNEL_URL_FILE, "parents": [folder]}, media_body=media, fields="id",
+        ).execute()
+
+
+def fetch_tunnel_url() -> str | None:
+    """Read back the address last published by `push_tunnel_url`, or None if
+    it hasn't been published yet or the lookup fails for any reason (missing
+    auth, network error, malformed payload, ...) -- callers fall back to a
+    static `REDSHIFT_API_URL` env var/secret on None rather than raising, the
+    same degrade-gracefully discipline as every other optional integration in
+    this app."""
+    try:
+        service = get_drive_service()
+        folder = _ensure_sync_folder(service)
+        for f in _list_files(service, folder):
+            if f.get("name") == _TUNNEL_URL_FILE:
+                data = service.files().get_media(fileId=f["id"]).execute()
+                return json.loads(data)["url"]
+    except Exception:  # noqa: BLE001 - any failure here just means "not published"
+        return None
+    return None

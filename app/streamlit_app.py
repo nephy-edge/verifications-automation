@@ -133,10 +133,52 @@ st.html(
     )
 )
 
+def _bootstrap_google_oauth_from_secrets() -> None:
+    """On Streamlit Community Cloud there's no local OAuth token file --
+    `google_oauth_token.json` is gitignored, and Streamlit secrets are
+    strings, not files -- so materialize it from `st.secrets` on first run,
+    the same secrets-to-file pattern `cash-watcher.yml` already uses for
+    GitHub Actions. No-op wherever the file already exists (local dev, or a
+    later rerun in the same deployment)."""
+    path = os.environ.get("GOOGLE_OAUTH_TOKEN_JSON", "google_oauth_token.json")
+    if os.path.exists(path):
+        return
+    try:
+        value = st.secrets.get("GOOGLE_OAUTH_TOKEN_JSON")
+    except Exception:  # noqa: BLE001 - no secrets.toml at all locally is fine
+        return
+    if value:
+        Path(path).write_text(value, encoding="utf-8")
+
+
+_bootstrap_google_oauth_from_secrets()
+
+
+@st.cache_data(ttl=120)
+def _resolve_redshift_api_url() -> str:
+    """Base URL for the redshift-api gateway.
+
+    Prefers the live address a local cloudflared watchdog publishes to Drive
+    (`phase0_foundations.drive_store.push_tunnel_url`) -- see
+    `scripts/cloudflared_watchdog.py` -- so a rotating tunnel URL never needs
+    a manual secret update on this app. Falls back to the static
+    `REDSHIFT_API_URL` env var/secret, and finally config.yaml's default.
+    Re-checked every `ttl` seconds so a rotated tunnel is picked up without a
+    redeploy.
+    """
+    try:
+        from phase0_foundations.drive_store import fetch_tunnel_url
+
+        published = fetch_tunnel_url()
+        if published:
+            return published.rstrip("/")
+    except Exception:  # noqa: BLE001 - any failure here just means "not published"
+        pass
+    return os.getenv("REDSHIFT_API_URL", CFG.services.api_url).rstrip("/")
+
+
 # Redshift Query API (redshift-api sibling) for the loan-tape dropdown.
-# URL is data-driven from config.yaml (`services.redshift.api_url`); the API key
-# name (and any override of the URL via env) still win over the file default.
-REDSHIFT_API_URL = os.getenv("REDSHIFT_API_URL", CFG.services.api_url).rstrip("/")
+REDSHIFT_API_URL = _resolve_redshift_api_url()
 REDSHIFT_API_KEY = os.getenv(CFG.services.api_key_env, "")
 
 

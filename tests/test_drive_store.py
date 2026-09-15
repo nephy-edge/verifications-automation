@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from phase0_foundations import drive_store
-from phase0_foundations.drive_store import pull_dir, push_dir
+from phase0_foundations.drive_store import fetch_tunnel_url, pull_dir, push_dir, push_tunnel_url
 
 
 def _md5(data: bytes) -> str:
@@ -151,3 +151,41 @@ def test_push_uploads_new_updates_changed_skips_same(drive, tmp_path, monkeypatc
     assert names.count("leasy/run_x.docx") == 1
     updated = [f for f in drive.files_dict.values() if f["name"] == "leasy/run_x.docx"][0]
     assert drive.content[updated["id"]] == b"v2"
+
+
+class _FakeMediaMem:
+    def __init__(self, payload, mimetype="application/json"):
+        self.payload = payload
+
+    def getbytes(self):
+        return self.payload
+
+
+def test_fetch_tunnel_url_none_when_never_published(drive):
+    assert fetch_tunnel_url() is None
+
+
+def test_push_tunnel_url_then_fetch_round_trips(drive, monkeypatch):
+    monkeypatch.setattr(drive_store, "MediaInMemoryUpload", _FakeMediaMem)
+
+    push_tunnel_url("https://one.trycloudflare.com")
+    assert fetch_tunnel_url() == "https://one.trycloudflare.com"
+
+
+def test_push_tunnel_url_updates_in_place_not_duplicated(drive, monkeypatch):
+    monkeypatch.setattr(drive_store, "MediaInMemoryUpload", _FakeMediaMem)
+
+    push_tunnel_url("https://one.trycloudflare.com")
+    push_tunnel_url("https://two.trycloudflare.com")
+
+    assert fetch_tunnel_url() == "https://two.trycloudflare.com"
+    matches = [f for f in drive.files_dict.values() if f["name"] == "redshift_tunnel_url.json"]
+    assert len(matches) == 1
+
+
+def test_fetch_tunnel_url_returns_none_on_any_failure(monkeypatch):
+    def _boom():
+        raise RuntimeError("no credentials available")
+
+    monkeypatch.setattr(drive_store, "get_drive_service", _boom)
+    assert fetch_tunnel_url() is None
