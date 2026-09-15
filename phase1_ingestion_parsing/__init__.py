@@ -7,10 +7,8 @@ cannot be parsed with rules (D2 band of the determinism spectrum).
 
 from phase1_ingestion_parsing.extract import extract_pdf, extract_pdf_text
 from phase1_ingestion_parsing.ingest import load_and_normalize, normalize_row
-from phase1_ingestion_parsing.methodology import Methodology
 
 __all__ = [
-    "Methodology",
     "extract_pdf",
     "extract_pdf_text",
     "load_and_normalize",

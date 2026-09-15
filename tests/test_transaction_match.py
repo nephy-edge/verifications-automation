@@ -11,12 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from phase2_verification_engine.transaction_match import (  # noqa: E402
     build_generic_match_report,
-    build_match_report,
     match_transactions,
     normalize_value,
     parse_amount,
     sum_amount_column,
-    to_exceptions,
 )
 
 
@@ -72,29 +70,6 @@ def test_empty_description_counts_as_unmatched_reported():
     reported = [{"key": "tape:1", "description": "", "amount": 500.0}]
     result = match_transactions(reported, [])
     assert result["unmatched_reported"] == reported
-
-
-def test_to_exceptions_covers_both_unmatched_sides():
-    result = {
-        "matched": [],
-        "unmatched_reported": [{"key": "tape:1", "description": "collections:LN100"}],
-        "unmatched_independent": [{"key": "bank:1", "description": "unrelated"}],
-    }
-    exceptions = to_exceptions(result, run_id="r1")
-    assert len(exceptions) == 2
-    assert all(e.kind == "bank_match" for e in exceptions)
-    assert any(e.id == "r1:match:in_reported_only:tape:1" for e in exceptions)
-    assert any(e.id == "r1:match:in_independent_only:bank:1" for e in exceptions)
-
-
-def test_build_match_report_has_one_row_per_record():
-    result = match_transactions(
-        [{"key": "tape:1", "description": "collections:LN100", "amount": 500.0}],
-        [{"key": "bank:1", "description": "unrelated", "amount": 20.0}],
-    )
-    df = build_match_report(result)
-    assert len(df) == 2
-    assert set(df["Status"]) == {"In reported only", "In independent only"}
 
 
 def test_match_transactions_matches_on_an_arbitrary_chosen_field():
@@ -172,8 +147,6 @@ if __name__ == "__main__":
     test_unmatched_on_both_sides_when_nothing_overlaps()
     test_matching_is_one_to_one_not_one_to_many()
     test_empty_description_counts_as_unmatched_reported()
-    test_to_exceptions_covers_both_unmatched_sides()
-    test_build_match_report_has_one_row_per_record()
     test_match_transactions_matches_on_an_arbitrary_chosen_field()
     test_build_generic_match_report_prefixes_columns_by_side()
     test_build_generic_match_report_keeps_every_column_not_just_description_and_amount()

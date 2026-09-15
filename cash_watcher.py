@@ -52,6 +52,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -113,8 +114,7 @@ def _fetch_borrowers(api_url: str, api_key: str) -> list[str]:
     return list(data.get("borrowers") or [])
 
 
-def _FULL_TAPE_LIMIT() -> int:
-    return 1_000_000
+FULL_TAPE_LIMIT = 1_000_000
 
 
 def _effective_tape_limit(cfg: Config) -> int:
@@ -122,7 +122,7 @@ def _effective_tape_limit(cfg: Config) -> int:
     full tape" (the server's own MAX_RESULTS_LIMIT still bounds the rows actually
     returned); a positive value is passed through as the requested limit."""
     limit = cfg.sop1.tape_fetch_limit
-    return limit if limit > 0 else _FULL_TAPE_LIMIT()
+    return limit if limit > 0 else FULL_TAPE_LIMIT
 
 
 def _fetch_tape(api_url: str, api_key: str, borrower: str, limit: int) -> list[dict]:
@@ -465,12 +465,15 @@ def _statement_breakdown(
         conv, _ = convert_to_base(float(r.get("amount") or 0), r.get("currency") or "", fx)
         return conv
 
-    by_statement: dict[str, dict] = {}
-    by_category: dict[str, dict] = {}
-    by_month: dict[str, dict] = {}
+    by_statement: dict[str, dict] = defaultdict(lambda: {"in": 0.0, "out": 0.0, "rows": 0})
+    by_category: dict[str, dict] = defaultdict(lambda: {"in": 0.0, "out": 0.0, "rows": 0})
+    by_month: dict[str, dict] = defaultdict(lambda: {
+        "tape_in": 0.0, "tape_out": 0.0, "bank_in": 0.0,
+        "bank_out": 0.0, "tape_rows": 0, "bank_rows": 0,
+    })
 
     def add(store: dict, key: str, row: dict) -> None:
-        bucket = store.setdefault(key, {"in": 0.0, "out": 0.0, "rows": 0})
+        bucket = store[key]
         bucket["rows"] += 1
         amt = usd(row)
         if row.get("direction") == DIR_IN:
@@ -482,9 +485,7 @@ def _statement_breakdown(
         ref = str(r.get("account_ref") or "?")
         add(by_statement, ref, r)
         add(by_category, _bank_category(r), r)
-        m = _month_key(r.get("value_date"))
-        bm = by_month.setdefault(m, {"tape_in": 0.0, "tape_out": 0.0, "bank_in": 0.0,
-                                     "bank_out": 0.0, "tape_rows": 0, "bank_rows": 0})
+        bm = by_month[_month_key(r.get("value_date"))]
         bm["bank_rows"] += 1
         amt = usd(r)
         if r.get("direction") == DIR_IN:
@@ -493,9 +494,7 @@ def _statement_breakdown(
             bm["bank_out"] += amt
 
     for ev in tape_rows:
-        m = _month_key(ev.get("value_date"))
-        bm = by_month.setdefault(m, {"tape_in": 0.0, "tape_out": 0.0, "bank_in": 0.0,
-                                     "bank_out": 0.0, "tape_rows": 0, "bank_rows": 0})
+        bm = by_month[_month_key(ev.get("value_date"))]
         bm["tape_rows"] += 1
         amt = usd(ev)
         if ev.get("direction") == DIR_IN:
@@ -764,27 +763,24 @@ def main() -> int:
         cfg.sop1.borrowers = list(args.borrower)
     interval = args.interval if args.interval is not None else cfg.sop1.interval_seconds
 
-    def sync_pull() -> None:
+    # direction -> (past-tense verb, destination phrase, failure-message suffix)
+    _SYNC_MESSAGES = {
+        "pull": ("pulled", "from Drive", "continuing with local state"),
+        "push": ("pushed", "to Drive", "state stays local"),
+    }
+
+    def _sync(direction: str) -> None:
         if not args.drive_sync:
             return
+        verb, dest, fail_suffix = _SYNC_MESSAGES[direction]
         try:
             from phase0_foundations import drive_store
 
-            n = drive_store.pull_dir(cfg.out_dir)
-            print(f"[sync] pulled {n} file(s) from Drive")
+            fn = drive_store.pull_dir if direction == "pull" else drive_store.push_dir
+            n = fn(cfg.out_dir)
+            print(f"[sync] {verb} {n} file(s) {dest}")
         except Exception as exc:  # noqa: BLE001 - a sync failure must never kill the watcher
-            print(f"[sync] pull failed (continuing with local state): {exc}", file=sys.stderr)
-
-    def sync_push() -> None:
-        if not args.drive_sync:
-            return
-        try:
-            from phase0_foundations import drive_store
-
-            n = drive_store.push_dir(cfg.out_dir)
-            print(f"[sync] pushed {n} file(s) to Drive")
-        except Exception as exc:  # noqa: BLE001
-            print(f"[sync] push failed (state stays local): {exc}", file=sys.stderr)
+            print(f"[sync] {direction} failed ({fail_suffix}): {exc}", file=sys.stderr)
 
     if args.sign_off or args.show_signoff:
         from phase0_foundations.signoff import (
@@ -803,7 +799,7 @@ def main() -> int:
             return 2
         borrower = args.borrower[0]
 
-        sync_pull()
+        _sync("pull")
         if args.show_signoff:
             record = get_signoff(cfg.out_dir, borrower, args.run_id)
             if not record:
@@ -828,22 +824,22 @@ def main() -> int:
             return 1
         print(f"[signoff] {borrower} run {record.run_id} signed off by {record.signed_by} "
               f"at {record.signed_at}")
-        sync_push()
+        _sync("push")
         return 0
 
     if args.once:
-        sync_pull()
+        _sync("pull")
         rc = _poll_once(cfg, args.dry_run)
-        sync_push()
+        _sync("push")
         return rc
 
     print(f"[watcher] polling every {interval}s "
           + ("(dry-run, no runs)" if args.dry_run else "") + ". Ctrl-C to stop.")
-    sync_pull()
+    _sync("pull")
     try:
         while True:
             _poll_once(cfg, args.dry_run)
-            sync_push()
+            _sync("push")
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\n[watcher] stopped")

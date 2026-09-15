@@ -14,7 +14,7 @@ import pytest
 
 from phase0_foundations.config import WatcherConfig, load_config
 from cash_watcher import (
-    _FULL_TAPE_LIMIT,
+    FULL_TAPE_LIMIT,
     _bank_row_dedup_key,
     _cut_off_status,
     _dedupe_bank_rows,
@@ -185,14 +185,14 @@ def test_watch_config_from_yaml_default():
 def test_effective_tape_limit_zero_means_full_tape(cfg):
     # 0 (the default / config.yaml value) means "fetch the full tape".
     cfg.sop1.tape_fetch_limit = 0
-    assert _effective_tape_limit(cfg) == _FULL_TAPE_LIMIT()
+    assert _effective_tape_limit(cfg) == FULL_TAPE_LIMIT
     # a negative value also means "full tape" (fall back to the sentinel).
     cfg.sop1.tape_fetch_limit = -1
-    assert _effective_tape_limit(cfg) == _FULL_TAPE_LIMIT()
+    assert _effective_tape_limit(cfg) == FULL_TAPE_LIMIT
     # a positive value is passed through as a sampled window.
     cfg.sop1.tape_fetch_limit = 1000
     assert _effective_tape_limit(cfg) == 1000
-    assert _effective_tape_limit(cfg) != _FULL_TAPE_LIMIT()
+    assert _effective_tape_limit(cfg) != FULL_TAPE_LIMIT
 
 
 def test_headless_run_produces_working_paper(tmp_path):

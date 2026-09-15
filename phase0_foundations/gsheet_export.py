@@ -20,13 +20,13 @@ from __future__ import annotations
 import csv
 import io
 import os
-from pathlib import Path
 from typing import Any
 
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+
+from phase0_foundations.oauth import load_credentials
 
 # drive.file: the app can only see/manage files *it* creates -- never a
 # standing grant over your whole Drive. Keep in sync with
@@ -50,34 +50,13 @@ def get_drive_service():
     if path in _service_cache:
         return _service_cache[path]
 
-    if not os.path.exists(path):
-        raise GSheetExportError(
-            f"No Google authorization found at '{path}'. Run "
-            "`python scripts/google_oauth_setup.py` once to sign in with your "
-            "own Google account before exporting."
-        )
-
-    try:
-        creds = UserCredentials.from_authorized_user_file(path, SCOPES)
-    except (OSError, ValueError) as exc:
-        raise GSheetExportError(f"Could not read Google authorization at '{path}': {exc}") from exc
-
-    if not creds.valid:
-        if creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as exc:  # noqa: BLE001 - surface refresh failures clearly
-                raise GSheetExportError(
-                    f"Google authorization at '{path}' could not be refreshed ({exc}). "
-                    "Re-run `python scripts/google_oauth_setup.py` to sign in again."
-                ) from exc
-            Path(path).write_text(creds.to_json(), encoding="utf-8")
-        else:
-            raise GSheetExportError(
-                f"Google authorization at '{path}' is invalid or was revoked. Re-run "
-                "`python scripts/google_oauth_setup.py` to sign in again."
-            )
-
+    creds = load_credentials(
+        path,
+        SCOPES,
+        GSheetExportError,
+        "Run `python scripts/google_oauth_setup.py` to sign in with your own "
+        "Google account before exporting.",
+    )
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
     _service_cache[path] = service
     return service

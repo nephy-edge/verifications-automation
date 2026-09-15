@@ -58,7 +58,7 @@ from __future__ import annotations
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from phase1_ingestion_parsing.ingest import DIR_IN, DIR_OUT, _looks_like_header
 from phase1_ingestion_parsing.ocr import ocr_extract_text, ocr_to_searchable_pdf
@@ -461,6 +461,53 @@ def _is_noise_line(line: list[dict[str, Any]]) -> bool:
     return any(r.search(text) for r in _NOISE_RE)
 
 
+def _iter_table_row_lines(
+    pages_lines: list[list[str]],
+    commit: Callable[[], None],
+    prefix: list[str],
+) -> Iterator[tuple[list[tuple[str, float, float]], dict[str, list[str]], str, bool]]:
+    """Shared walk over a numbered-narration table's physical lines.
+
+    Both `_scan_numbered_table` and `_extract_positioned_table_rows` need the
+    same state machine before they can do anything statement-specific: skip
+    noise lines, refresh `header_columns` whenever the table header repeats
+    (e.g. across a page break), skip everything before the first header seen,
+    then map each remaining line to columns and classify it. `commit()` is
+    called (and `prefix` cleared, in place) at every such boundary, including
+    once more after the last line — callers must mutate `prefix` in place
+    (`.append`/`.clear`), never reassign it, since this generator holds the
+    same list object.
+
+    Yields `(header_columns, tokens, hash_tok, is_row)` once a header has
+    been seen; `is_row` is True exactly when `hash_tok` matches the row-number
+    pattern and the line carries a DATE. What happens next — whether a "row"
+    actually gets built (`_scan_numbered_table` drops a numbered/dated line
+    with no money; `_extract_positioned_table_rows` keeps it) and how the
+    pending row/continuation is shaped — is left to the caller, since the two
+    diverge there.
+    """
+    header_columns: list[tuple[str, float, float]] | None = None
+    for page_lines in pages_lines:
+        for line in page_lines:
+            if _is_noise_line(line):
+                commit()
+                prefix.clear()
+                continue
+            cols = _table_header_columns(line)
+            if cols is not None:
+                header_columns = cols
+                commit()
+                prefix.clear()
+                continue
+            if header_columns is None:
+                continue  # page 1 header blocks / monthly summaries: not this table
+            tokens = _map_line_to_columns(line, header_columns)
+            hash_tok = "".join(tokens["#"])
+            is_row = bool(_ROW_NUM_RE.match(hash_tok) and "".join(tokens["DATE"]))
+            yield header_columns, tokens, hash_tok, is_row
+    commit()
+
+
 def _scan_numbered_table(path: str | Path, account_ref: str = "") -> list[dict[str, Any]] | None:
     """Parse a Mono/GTBank numbered-narration statement from its word layout.
 
@@ -479,7 +526,6 @@ def _scan_numbered_table(path: str | Path, account_ref: str = "") -> list[dict[s
     rows: list[dict[str, Any]] = []
     pending: dict[str, Any] | None = None
     prefix: list[str] = []
-    header_columns: list[tuple[str, float, float]] | None = None
     row_no = 0
 
     def commit() -> None:
@@ -488,65 +534,50 @@ def _scan_numbered_table(path: str | Path, account_ref: str = "") -> list[dict[s
             rows.append(pending)
             pending = None
 
-    for page_lines in pages_lines:
-        for line in page_lines:
-            if _is_noise_line(line):
-                commit()
-                prefix = []
-                continue
-            cols = _table_header_columns(line)
-            if cols is not None:
-                header_columns = cols
-                commit()
-                prefix = []
-                continue
-            if header_columns is None:
-                continue  # page 1 header blocks / monthly summaries: not this table
-
-            tokens = _map_line_to_columns(line, header_columns)
-            hash_tok = "".join(tokens["#"])
-            if _ROW_NUM_RE.match(hash_tok) and "".join(tokens["DATE"]):
-                # A numbered transaction row.
-                commit()
-                debit = _first_number(tokens["DEBIT"])
-                credit = _first_number(tokens["CREDIT"])
-                balance = _first_number(tokens["BALANCE"])
-                if credit is not None:
-                    amount, direction = credit, DIR_IN
-                elif debit is not None:
-                    amount, direction = debit, DIR_OUT
-                else:
-                    continue  # numbered line with no money: not a transaction
-                description = " ".join(prefix + tokens["NARRATION"]).strip()
-                prefix = []
-                row_no += 1
-                pending = {
-                    "key": f"bank:{account_ref}:{row_no}",
-                    "sheet": "bank",
-                    "source_type": "bank",
-                    "value_date": _parse_month_name_date(" ".join(tokens["DATE"])),
-                    "amount": abs(amount),
-                    "direction": direction,
-                    "currency": "",
-                    "description": description,
-                    "account_ref": account_ref,
-                    "confidence": 1.0,
-                    "balance": balance,
-                }
+    for _header_columns, tokens, _hash_tok, is_row in _iter_table_row_lines(
+        pages_lines, commit, prefix
+    ):
+        if is_row:
+            # A numbered transaction row.
+            commit()
+            debit = _first_number(tokens["DEBIT"])
+            credit = _first_number(tokens["CREDIT"])
+            balance = _first_number(tokens["BALANCE"])
+            if credit is not None:
+                amount, direction = credit, DIR_IN
+            elif debit is not None:
+                amount, direction = debit, DIR_OUT
             else:
-                # A narration continuation — prefix before the first numbered
-                # row, suffix after any row in flight. Multi-line narrations.
-                narration = " ".join(tokens["NARRATION"]).strip()
-                if narration:
-                    if pending is not None:
-                        pending["description"] = (
-                            pending["description"] + " " + narration
-                            if pending["description"]
-                            else narration
-                        )
-                    else:
-                        prefix.append(narration)
-    commit()
+                continue  # numbered line with no money: not a transaction
+            description = " ".join(prefix + tokens["NARRATION"]).strip()
+            prefix.clear()
+            row_no += 1
+            pending = {
+                "key": f"bank:{account_ref}:{row_no}",
+                "sheet": "bank",
+                "source_type": "bank",
+                "value_date": _parse_month_name_date(" ".join(tokens["DATE"])),
+                "amount": abs(amount),
+                "direction": direction,
+                "currency": "",
+                "description": description,
+                "account_ref": account_ref,
+                "confidence": 1.0,
+                "balance": balance,
+            }
+        else:
+            # A narration continuation — prefix before the first numbered
+            # row, suffix after any row in flight. Multi-line narrations.
+            narration = " ".join(tokens["NARRATION"]).strip()
+            if narration:
+                if pending is not None:
+                    pending["description"] = (
+                        pending["description"] + " " + narration
+                        if pending["description"]
+                        else narration
+                    )
+                else:
+                    prefix.append(narration)
     return rows if rows else None
 
 
@@ -1006,44 +1037,30 @@ def _extract_positioned_table_rows(path: str | Path, account_ref: str) -> tuple[
                 raw_rows.append({k: " ".join(v).strip() for k, v in pending.items()})
                 pending = None
 
-        for page_lines in pages_lines:
-            for line in page_lines:
-                if _is_noise_line(line):
-                    commit()
-                    prefix = []
-                    continue
-                cols = _table_header_columns(line)
-                if cols is not None:
-                    header_columns = cols
-                    commit()
-                    prefix = []
-                    continue
-                if header_columns is None:
-                    continue
-                tokens = _map_line_to_columns(line, header_columns)
-                hash_tok = "".join(tokens["#"])
-                # NOTE: this row/continuation assembly mirrors `_scan_numbered_table`'s
-                # loop (row-number + date gate, pending/prefix narration merge). If the
-                # parse rules there change (a numbered line with no DATE is a narration
-                # continuation, not a transaction), mirror the change here too.
-                if _ROW_NUM_RE.match(hash_tok) and "".join(tokens["DATE"]):
-                    commit()
-                    narration = " ".join(prefix + tokens["NARRATION"]).strip()
-                    prefix = []
-                    pending = {name: [] for name, _, _ in header_columns}
-                    pending["#"] = [hash_tok]
-                    pending["DATE"] = list(tokens["DATE"])
-                    pending["NARRATION"] = [narration]
-                    for col in ("DEBIT", "CREDIT", "BALANCE"):
-                        pending[col] = [t for t in tokens[col] if t]
-                else:
-                    narration = " ".join(tokens["NARRATION"]).strip()
-                    if narration:
-                        if pending is not None:
-                            pending["NARRATION"].append(narration)
-                        else:
-                            prefix.append(narration)
-        commit()
+        # NOTE: this row/continuation assembly mirrors `_scan_numbered_table`'s
+        # loop (row-number + date gate, pending/prefix narration merge) via the
+        # shared `_iter_table_row_lines` walk. If the parse rules there change
+        # (a numbered line with no DATE is a narration continuation, not a
+        # transaction), mirror the change here too.
+        for hc, tokens, hash_tok, is_row in _iter_table_row_lines(pages_lines, commit, prefix):
+            header_columns = hc
+            if is_row:
+                commit()
+                narration = " ".join(prefix + tokens["NARRATION"]).strip()
+                prefix.clear()
+                pending = {name: [] for name, _, _ in header_columns}
+                pending["#"] = [hash_tok]
+                pending["DATE"] = list(tokens["DATE"])
+                pending["NARRATION"] = [narration]
+                for col in ("DEBIT", "CREDIT", "BALANCE"):
+                    pending[col] = [t for t in tokens[col] if t]
+            else:
+                narration = " ".join(tokens["NARRATION"]).strip()
+                if narration:
+                    if pending is not None:
+                        pending["NARRATION"].append(narration)
+                    else:
+                        prefix.append(narration)
 
         if header_columns is None or not raw_rows:
             return None

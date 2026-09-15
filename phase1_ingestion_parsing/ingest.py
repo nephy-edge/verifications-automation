@@ -13,6 +13,7 @@ caller) so the workflow never guesses about a file's shape.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 from collections.abc import Sequence
@@ -30,7 +31,8 @@ SHEET_LEDGER = "ledger"
 # questionnaire (free text, checkboxes), never a transaction ledger. There is
 # no tabular schema to detect here; it is ingested as a reference attachment
 # (see app/streamlit_app.py) for a human to read, not parsed for amounts.
-SHEET_CASH_MAP = "cash_map"
+# (Hence no SHEET_CASH_MAP constant here — cash maps never flow through
+# DEFAULT_SCHEMAS/load_and_normalize; see cashmap.py's own parse_cash_map.)
 
 DIR_IN = "in"
 DIR_OUT = "out"
@@ -80,7 +82,7 @@ def _parse_float(value: Any) -> float:
         f = float(value)
     except (TypeError, ValueError):
         return 0.0
-    return 0.0 if f != f else f  # NaN != NaN
+    return 0.0 if math.isnan(f) else f
 
 
 def _first_present_date(row: dict[str, Any], *keys: str) -> str:
@@ -405,13 +407,9 @@ def _load_file(path: Path, sheet: str, schema: dict[str, str] | None) -> list[di
             return rows
         # Falls through to the simplified date/amount/type/currency format below.
 
-    col_map = schema or DEFAULT_SCHEMAS.get(sheet, {})
-    # Build a limited view of only the columns we might read.
     rows = []
-    target_cols = set(col_map.values()) | {"value_date", "amount", "description", "currency", "date", "narration", "type"}
     for i, record in enumerate(df.to_dict("records")):
-        slim = {k: v for k, v in record.items() if k in target_cols or k in col_map}
-        n = normalize_row(slim, sheet=sheet, schema=schema, account_ref=path.stem, index=i)
+        n = normalize_row(record, sheet=sheet, schema=schema, account_ref=path.stem, index=i)
         if n:
             rows.append(n)
     return rows

@@ -317,8 +317,8 @@ live lookup).
 ```
 
 **One-time OAuth grants** (browser flows, tokens written to `.env`):
-`scripts/google_oauth_setup.py` (Drive store), `google_oauth_setup_inbox.py`
-(Drive inbox), `google_oauth_setup_gmail.py` (Gmail send).
+`scripts/google_oauth_setup.py` (Sheets export, default), `--feature inbox`
+(Drive inbox), `--feature gmail` (Gmail send).
 
 ## 9. The `redshift-api` sibling service
 

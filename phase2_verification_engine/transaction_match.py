@@ -34,8 +34,6 @@ from typing import Any
 
 import pandas as pd
 
-from phase0_foundations.models import ExceptionItem
-
 _SPECIAL_CHARS_RE = re.compile(r"[^\w\s-]")
 
 
@@ -128,83 +126,6 @@ def match_transactions(
     }
 
 
-def to_exceptions(match_result: dict[str, list[dict[str, Any]]], run_id: str = "") -> list[ExceptionItem]:
-    """One exception per unmatched record on either side, kind="bank_match".
-
-    Not called automatically by the main pipeline (see module docstring) —
-    for a caller that explicitly wants unmatched transactions surfaced in the
-    review queue rather than only the standalone match report.
-    """
-    tag = f"{run_id}:match" if run_id else "match"
-    exceptions: list[ExceptionItem] = []
-    for rec in match_result["unmatched_reported"]:
-        exceptions.append(
-            ExceptionItem(
-                id=f"{tag}:in_reported_only:{rec.get('key') or len(exceptions)}",
-                kind="bank_match",
-                severity=0.4,
-                description=(
-                    f"Reported transaction '{rec.get('description', '')}' has no matching "
-                    "independent-side record."
-                ),
-                evidence=[rec["key"]] if rec.get("key") else [],
-            )
-        )
-    for rec in match_result["unmatched_independent"]:
-        exceptions.append(
-            ExceptionItem(
-                id=f"{tag}:in_independent_only:{rec.get('key') or len(exceptions)}",
-                kind="bank_match",
-                severity=0.4,
-                description=(
-                    f"Independent-side transaction '{rec.get('description', '')}' has no matching "
-                    "reported record."
-                ),
-                evidence=[rec["key"]] if rec.get("key") else [],
-            )
-        )
-    return exceptions
-
-
-def build_match_report(match_result: dict[str, list[dict[str, Any]]]) -> pd.DataFrame:
-    """Flatten a match result into one row per record, for an Excel export."""
-    rows: list[dict[str, Any]] = []
-    for m in match_result["matched"]:
-        rows.append(
-            {
-                "Status": "Matched" if m["match_type"] == "exact" else "Partial match",
-                "Match key": m["match_key"],
-                "Reported description": m["reported"].get("description", ""),
-                "Reported amount": m["reported"].get("amount"),
-                "Independent description": m["independent"].get("description", ""),
-                "Independent amount": m["independent"].get("amount"),
-            }
-        )
-    for rec in match_result["unmatched_reported"]:
-        rows.append(
-            {
-                "Status": "In reported only",
-                "Match key": "",
-                "Reported description": rec.get("description", ""),
-                "Reported amount": rec.get("amount"),
-                "Independent description": "",
-                "Independent amount": None,
-            }
-        )
-    for rec in match_result["unmatched_independent"]:
-        rows.append(
-            {
-                "Status": "In independent only",
-                "Match key": "",
-                "Reported description": "",
-                "Reported amount": None,
-                "Independent description": rec.get("description", ""),
-                "Independent amount": rec.get("amount"),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 _AMOUNT_CLEAN_RE = re.compile(r"[^0-9.\-]")
 
 
@@ -259,12 +180,11 @@ def sum_amount_column(records: list[dict[str, Any]], column: str) -> tuple[float
 
 def build_generic_match_report(match_result: dict[str, list[dict[str, Any]]]) -> pd.DataFrame:
     """Flatten a match result into one row per record, keeping every column
-    from both sides rather than the fixed description/amount pair
-    `build_match_report` assumes — for matching on raw, arbitrary columns
-    (e.g. a statement's own "Transaction Code") where there's no canonical
-    schema to fall back on. Reported columns are prefixed "Reported: ",
-    independent "Independent: ", so same-named columns on both sides don't
-    collide."""
+    from both sides rather than a fixed description/amount pair — for
+    matching on raw, arbitrary columns (e.g. a statement's own "Transaction
+    Code") where there's no canonical schema to fall back on. Reported
+    columns are prefixed "Reported: ", independent "Independent: ", so
+    same-named columns on both sides don't collide."""
     rows: list[dict[str, Any]] = []
     for m in match_result["matched"]:
         row: dict[str, Any] = {

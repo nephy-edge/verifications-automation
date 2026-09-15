@@ -7,13 +7,13 @@ import json
 
 import pytest
 
-from phase0_foundations import gmail_send
+from phase0_foundations import gmail_send, oauth
 from phase0_foundations.gmail_send import GmailSendError, get_gmail_service, send_raw_message
 
 
 def test_get_service_raises_when_token_missing(monkeypatch):
     monkeypatch.setenv("GOOGLE_OAUTH_GMAIL_TOKEN_JSON", "/nonexistent/token.json")
-    with pytest.raises(GmailSendError, match="google_oauth_setup_gmail"):
+    with pytest.raises(GmailSendError, match=r"google_oauth_setup\.py --feature gmail"):
         get_gmail_service()
 
 
@@ -38,9 +38,9 @@ def test_get_service_refreshes_expired_token(monkeypatch, tmp_path):
     class FakeRequest:
         pass
 
-    monkeypatch.setattr(gmail_send.UserCredentials, "from_authorized_user_file",
+    monkeypatch.setattr(oauth.UserCredentials, "from_authorized_user_file",
                         lambda path, scopes: FakeCreds())
-    monkeypatch.setattr("phase0_foundations.gmail_send.Request", FakeRequest)
+    monkeypatch.setattr(oauth, "Request", FakeRequest)
     built = {}
 
     def fake_build(api, version, credentials=None, cache_discovery=False):

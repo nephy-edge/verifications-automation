@@ -11,7 +11,7 @@ scope (which only sees files the app itself created and cannot list a folder
 another party uploads to). To read a dropped-statement inbox you must grant the
 broader read scope once:
 
-    python scripts/google_oauth_setup_inbox.py   # one-time, opens browser
+    python scripts/google_oauth_setup.py --feature inbox   # one-time, opens browser
 
 The resulting token is stored at `GOOGLE_OAUTH_INBOX_TOKEN_JSON`
 (default: google_oauth_inbox_token.json) and refreshed silently at runtime.
@@ -30,12 +30,11 @@ from __future__ import annotations
 import io
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
+
+from phase0_foundations.oauth import load_credentials
 
 # Read-only — only ever lists/downloads; never creates, edits or moves content.
 SCOPE_READONLY = "https://www.googleapis.com/auth/drive.readonly"
@@ -74,34 +73,14 @@ def get_drive_service():
     if path in _service_cache:
         return _service_cache[path]
 
-    if not os.path.exists(path):
-        raise DriveInboxError(
-            f"No read-only Google authorization found at '{path}'. Statements will "
-            "not be fetched from Drive. Run `python scripts/google_oauth_setup_inbox.py` "
-            "once to sign in with your Google account (grants drive.readonly so the "
-            "app can list/download your dropped statements)."
-        )
-    try:
-        creds = UserCredentials.from_authorized_user_file(path, [SCOPE_READONLY])
-    except (OSError, ValueError) as exc:
-        raise DriveInboxError(f"Could not read Drive inbox authorization '{path}': {exc}") from exc
-
-    if not creds.valid:
-        if creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as exc:  # noqa: BLE001 - surface refresh failures clearly
-                raise DriveInboxError(
-                    f"Drive inbox token at '{path}' could not be refreshed ({exc}). "
-                    "Re-run `python scripts/google_oauth_setup_inbox.py`."
-                ) from exc
-            Path(path).write_text(creds.to_json(), encoding="utf-8")
-        else:
-            raise DriveInboxError(
-                f"Drive inbox authorization at '{path}' is invalid/revoked. "
-                "Re-run `python scripts/google_oauth_setup_inbox.py`."
-            )
-
+    creds = load_credentials(
+        path,
+        [SCOPE_READONLY],
+        DriveInboxError,
+        "Run `python scripts/google_oauth_setup.py --feature inbox` to sign in "
+        "with your Google account (grants drive.readonly so the app can "
+        "list/download your dropped statements).",
+    )
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
     _service_cache[path] = service
     return service
@@ -193,13 +172,3 @@ def _stream(req) -> bytes:
     while not done:
         _, done = downloader.next_chunk()
     return buf.getvalue()
-
-
-def sanity_check() -> str:
-    service = get_drive_service()
-    about = service.about().get(fields="user(emailAddress)").execute()
-    return about.get("user", {}).get("emailAddress", "unknown")
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()

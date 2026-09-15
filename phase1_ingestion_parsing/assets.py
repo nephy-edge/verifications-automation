@@ -47,6 +47,18 @@ def _find_col(columns: Any, *needles: str) -> str | None:
     return None
 
 
+def suggest_column(columns: Any, candidates: Sequence[str]) -> str | None:
+    """Best-guess column for a role (plate/borrower/expected-owner/...) given
+    a config-driven list of candidate header keywords, checked in order.
+
+    Used to pre-select the app's column-mapping dropdowns (streamlit_app.py)
+    so a user only has to confirm or override, not hunt through their file's
+    headers -- the same keyword match `load_expected_assets` uses internally,
+    exposed so the UI can offer it as a suggestion rather than a silent guess.
+    """
+    return _find_col(columns, *candidates)
+
+
 def _read_tabular(path: Path) -> pd.DataFrame:
     if path.suffix.lower() in (".csv", ".txt"):
         return pd.read_csv(path)

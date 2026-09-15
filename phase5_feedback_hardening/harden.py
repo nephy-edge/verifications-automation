@@ -16,10 +16,6 @@ from phase0_foundations.log import RunLog
 from phase0_foundations.models import ExceptionItem
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def exception_pattern(item: ExceptionItem) -> str:
     """Stable rule/category tag for an exception, taken from its id.
 
@@ -57,7 +53,7 @@ def promote_to_rule(log: RunLog, pattern: str, change_made: str, effect: str) ->
     log.append(
         {
             "event": "hardening",
-            "date": _now()[:10],
+            "date": datetime.now(timezone.utc).isoformat()[:10],
             "pattern": pattern,
             "change_made": change_made,
             "effect": effect,
@@ -65,11 +61,6 @@ def promote_to_rule(log: RunLog, pattern: str, change_made: str, effect: str) ->
     )
 
 
-class HardeningLog:
+def hardening_entries(log: RunLog) -> list[dict]:
     """Read the hardening history from a run log."""
-
-    def __init__(self, log: RunLog) -> None:
-        self.log = log
-
-    def entries(self) -> list[dict]:
-        return [e for e in self.log.read() if e.get("event") == "hardening"]
+    return [e for e in log.read() if e.get("event") == "hardening"]

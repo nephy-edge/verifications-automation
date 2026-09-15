@@ -24,6 +24,7 @@ docs/Verifications_Checklist.md) -- not built rather than guessed.
 
 from __future__ import annotations
 
+import statistics
 from typing import Any
 from collections.abc import Iterable
 
@@ -32,8 +33,8 @@ from phase0_foundations.models import ExceptionItem
 
 
 def _median(rows: list[dict[str, Any]]) -> float:
-    amounts = sorted(r.get("amount") or 0.0 for r in rows)
-    return amounts[len(amounts) // 2] if amounts else 0.0
+    amounts = [r.get("amount") or 0.0 for r in rows]
+    return statistics.median(amounts) if amounts else 0.0
 
 
 def _extract_hour(value_date: str) -> int | None:

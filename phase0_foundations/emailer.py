@@ -6,7 +6,7 @@ it via the Gmail API using the project's existing Google OAuth pattern
 corporate Google Workspace accounts commonly have app passwords disabled by the
 domain admin.
 
-One-time setup: `python scripts/google_oauth_setup_gmail.py` (grants gmail.send).
+One-time setup: `python scripts/google_oauth_setup.py --feature gmail` (grants gmail.send).
 The token is read from .env at send time via `gmail_token_env`; recipients/from/
 subject are data-driven config. Disabled by default and only meaningful after a
 real authenticated send is verified (repo rule: no external integration goes

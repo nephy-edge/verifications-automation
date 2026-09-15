@@ -387,7 +387,7 @@ sop1:
     # gmail.send scope) — no SMTP app password needed, so it works on corporate
     # Google Workspace accounts where the admin has disabled app passwords. The
     # disk write remains the audit trail; email is additional delivery. One-time
-    # setup: `python scripts/google_oauth_setup_gmail.py` (grants gmail.send,
+    # setup: `python scripts/google_oauth_setup.py --feature gmail` (grants gmail.send,
     # token saved to GOOGLE_OAUTH_GMAIL_TOKEN_JSON in .env). Keep enabled:false
     # until a real authenticated send is verified (repo rule: no external
     # integration goes live on config alone).
@@ -400,7 +400,7 @@ sop1:
     # SOP 1 statement drop-folder: read bank/wallet statements humans place in a
     # Google Drive folder, feed them into reconciliation as the independent side,
     # and retain the raw files as the audit trail. Requires a `drive.readonly`
-    # OAuth token (run `python scripts/google_oauth_setup_inbox.py` once). Without
+    # OAuth token (run `python scripts/google_oauth_setup.py --feature inbox` once). Without
     # the token the watcher degrades to tape-only (reconciliation is surfaced as
     # "NOT VERIFIED") instead of crashing. `inbox_folder` is a Drive folder id or
     # name; `folder_by_borrower` overrides per borrower.
@@ -526,6 +526,17 @@ vehicle_registry:
     CL: { path: "vehicle", extra: [] }
     AR: { path: "vehicle", extra: [] }
     BR: { path: "vehicle", extra: [] }
+
+# Asset & vehicle verification (app/streamlit_app.py): candidate header names
+# for the upload's column-mapping dropdowns, checked in order and matched by
+# substring against the uploaded file's actual columns to pick a default --
+# the user can always override the suggestion. Add an exporter's own spelling
+# here rather than teaching the app a new hardcoded keyword.
+asset_verification:
+  plate_columns: ["plate", "registration", "asset id", "asset_id"]
+  borrower_columns: ["borrower"]
+  expected_owner_columns: ["expected_owner", "expected owner", "owner", "propietario"]
+  expected_vehicle_columns: ["expected_vehicle", "expected vehicle", "vehicle description", "make model"]
 
 logging:
   path: verifications.log.jsonl

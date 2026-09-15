@@ -99,6 +99,38 @@ class AssetsConfig:
 
 
 @dataclass
+class AssetVerificationConfig:
+    """Column-name candidates for the asset/vehicle-verification upload's
+    auto-suggest dropdowns (app/streamlit_app.py's Asset & vehicle
+    verification tab). Each list is checked in order, matched by substring
+    against the uploaded file's actual headers -- the same keyword approach
+    `phase1_ingestion_parsing.assets._find_col` already used, just made
+    data-driven so a new exporter's header spelling is a config edit, not a
+    code change."""
+
+    plate_columns: tuple[str, ...] = ("plate", "registration", "asset id", "asset_id")
+    borrower_columns: tuple[str, ...] = ("borrower",)
+    expected_owner_columns: tuple[str, ...] = ("expected_owner", "expected owner", "owner", "propietario")
+    expected_vehicle_columns: tuple[str, ...] = (
+        "expected_vehicle",
+        "expected vehicle",
+        "vehicle description",
+        "make model",
+    )
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> AssetVerificationConfig:
+        d = d or {}
+        defaults = cls()
+        return cls(
+            plate_columns=tuple(d.get("plate_columns") or defaults.plate_columns),
+            borrower_columns=tuple(d.get("borrower_columns") or defaults.borrower_columns),
+            expected_owner_columns=tuple(d.get("expected_owner_columns") or defaults.expected_owner_columns),
+            expected_vehicle_columns=tuple(d.get("expected_vehicle_columns") or defaults.expected_vehicle_columns),
+        )
+
+
+@dataclass
 class VehiclePath:
     path: str = ""
     extra: tuple[str, ...] = ()
@@ -226,7 +258,7 @@ class BankStatementsConfig:
 
     `inbox_folder` is either a Drive folder id or a folder *name* under the
     user's Drive root. `folder_by_borrower` overrides it per borrower. Requires
-    a `drive.readonly` OAuth token (see scripts/google_oauth_setup_inbox.py);
+    a `drive.readonly` OAuth token (see `scripts/google_oauth_setup.py --feature inbox`);
     without one the watcher degrades to tape-only rather than crashing."""
 
     enabled: bool = False
@@ -252,7 +284,7 @@ class EmailConfig:
 
     Sends the working paper (.md + .json) after every change-triggered run
     through the Gmail API (`gmail.send` scope, one-time browser grant in
-    scripts/google_oauth_setup_gmail.py). Used instead of SMTP app passwords
+    `scripts/google_oauth_setup.py --feature gmail`). Used instead of SMTP app passwords
     because corporate Google Workspace accounts commonly have app passwords
     disabled by the domain admin. The token file path is read from `.env` via
     `gmail_token_env`; recipients/from/subject are data-driven config. Disabled
@@ -331,6 +363,7 @@ class Config:
     services: ServiceConfig = field(default_factory=ServiceConfig)
     assets: AssetsConfig = field(default_factory=AssetsConfig)
     vehicle_registry: VehicleRegistryConfig = field(default_factory=VehicleRegistryConfig)
+    asset_verification: AssetVerificationConfig = field(default_factory=AssetVerificationConfig)
     loan_tape_columns: LoanTapeColumnsConfig = field(default_factory=LoanTapeColumnsConfig)
     sop1: WatcherConfig = field(default_factory=WatcherConfig)
     log_path: Path = Path("verifications.log.jsonl")
@@ -346,6 +379,7 @@ class Config:
             services=ServiceConfig.from_dict((d.get("services") or {}).get("redshift")),
             assets=AssetsConfig.from_dict(d.get("assets")),
             vehicle_registry=VehicleRegistryConfig.from_dict(d.get("vehicle_registry")),
+            asset_verification=AssetVerificationConfig.from_dict(d.get("asset_verification")),
             loan_tape_columns=LoanTapeColumnsConfig.from_dict(d.get("loan_tape_columns")),
             sop1=WatcherConfig.from_dict((d.get("sop1") or {}).get("watcher")),
         )

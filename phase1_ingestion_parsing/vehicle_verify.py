@@ -27,6 +27,7 @@ The canonical record returned by any client is a flat dict with the fields in
 from __future__ import annotations
 
 import json
+import math
 import os
 import urllib.error
 import urllib.parse
@@ -54,7 +55,6 @@ CANONICAL_FIELDS = [
 # countries Verifik documents vehicle endpoints for but this codebase has not
 # yet confirmed against a real live response (see each CountryConfig): they
 # show in the selector but the live client refuses them until confirmed.
-_COUNTRY_ORDER = ["PE", "MX", "CO", "CL", "AR", "BR", "EC", "BO", "CR", "PY", "US"]
 
 
 def _registry_cfg() -> VehicleRegistryConfig | None:
@@ -83,249 +83,209 @@ class CountryConfig:
     # primary/via lookups can run (e.g. Colombia's RUNT is keyed to the owner's
     # document type + number, not just the plate). Shown only when non-empty.
     extra_inputs: tuple[str, ...] = ()
-    # Optional extra billed endpoints for data the primary lookup can't return
-    # (e.g. Chile's SOAP registration-status lookup).
-    extra_endpoints: tuple[str, ...] = ()
 
 
 COUNTRY_CONFIG: dict[str, CountryConfig] = {
-    code: _cfg
-    for code, _cfg in [
-        (
-            "PE",
-            CountryConfig(
-                code="PE",
-                name="Peru",
-                # Confirmed against Verifik's own docs (docs.verifik.co/vehicle-validation/
-                # peru/peruvian-vehicle): GET /v2/pe/vehiculo/placa?plate=... returns
-                # English field names, nested under "data" — no owner/color/status field
-                # at all (that would need a separate, unconfirmed SUNARP/"Full ID"
-                # product). `chasisSerial` is the closest thing to a VIN this endpoint has.
-                primary_endpoint="vehiculo/placa",
-                field_map={
-                    "plate": "plate",
-                    "brand": "brand",
-                    "model": "model",
-                    "year": "year",
-                    "chasisserial": "vin",
-                },
-            ),
-        ),
-        (
-            "MX",
-            CountryConfig(
-                code="MX",
-                name="Mexico",
-                # UNCONFIRMED: GET /v2/mx/vehiculo/placa consistently returned
-                # "500 InternalServerError: 501" for three different test plates —
-                # either the path is wrong or this product isn't on this account's
-                # plan. field_map below is the best publicly-documented guess,
-                # not verified against a real response; VerifikClient._call
-                # refuses this country until a real 200 is actually observed.
-                primary_endpoint="vehiculo/placa",
-                field_map={
-                    "plate": "plate",
-                    "make": "brand",
-                    "model": "model",
-                    "year": "year",
-                    "vin": "vin",
-                    "owner": "owner",
-                    "status": "status",
-                },
-            ),
-        ),
-        (
-            "CO",
-            CountryConfig(
-                code="CO",
-                name="Colombia",
-                # Confirmed with a real, authenticated live call (not docs): GET
-                # /v2/co/runt/vehicle-by-plate-simplified?plate=&documentType=&
-                # documentNumber= -> {"data": {"plate": ..., "vehicle": {"marca",
-                # "linea", "modelo" (this is the YEAR, not a model — RUNT quirk),
-                # "color", "estadoDelVehiculo", "noVin", ...}}}. No owner field —
-                # RUNT ties ownership to the document number you queried with,
-                # doesn't hand back a name.
-                primary_endpoint="runt/vehicle-by-plate-simplified",
-                field_map={
-                    "plate": "plate",
-                    "marca": "brand",
-                    "linea": "model",
-                    "modelo": "year",
-                    "novin": "vin",
-                    "color": "color",
-                    "estadodelvehiculo": "status",
-                },
-                extra_inputs=("document_type", "document_number"),
-            ),
-        ),
-        (
-            "CL",
-            CountryConfig(
-                code="CL",
-                name="Chile",
-                # Confirmed with a real, authenticated live call: GET /v2/cl/
-                # vehicle?plate=... -> {"data": {"plate","mark" (not "brand"!),
-                # "model","year","chasisNumber","color","owner","rut","fines",
-                # "type",...}}. The only country confirmed to actually return an
-                # owner name (a real live test returned a genuine company name).
-                primary_endpoint="vehicle",
-                field_map={
-                    "plate": "plate",
-                    "mark": "brand",
-                    "model": "model",
-                    "year": "year",
-                    "chasisnumber": "vin",
-                    "owner": "owner",
-                    "color": "color",
-                },
-            ),
-        ),
-        (
-            "AR",
-            CountryConfig(
-                code="AR",
-                name="Argentina",
-                # Confirmed with a real, authenticated live call (twice, two
-                # plates): GET /v2/ar/vehicle?plate=... -> {"data": {"plate",
-                # "brand","model","year","type","version",...}}. No owner, no
-                # color, no VIN/chassis field on this endpoint at all.
-                primary_endpoint="vehicle",
-                field_map={
-                    "plate": "plate",
-                    "brand": "brand",
-                    "model": "model",
-                    "year": "year",
-                },
-            ),
-        ),
-        (
-            "BR",
-            CountryConfig(
-                code="BR",
-                name="Brazil",
-                # Confirmed with a real, authenticated live call: GET /v2/br/
-                # vehicle?plate=... -> {"data": {"plate","brand","model",
-                # "modelYear" (the real year field — confirmed by the API's own
-                # error text on a bad plate: "..._does_not_have_modelYear"),
-                # "color",...}}. No owner field; "chassis" appears in Verifik's
-                # docs but was empty/absent on the one real success observed, so
-                # left unmapped rather than guessed.
-                primary_endpoint="vehicle",
-                field_map={
-                    "plate": "plate",
-                    "brand": "brand",
-                    "model": "model",
-                    "modelyear": "year",
-                    "color": "color",
-                },
-            ),
-        ),
-        (
-            "EC",
-            CountryConfig(
-                code="EC",
-                name="Ecuador",
-                # UNCONFIRMED: GET /v2/ec/vehiculo/placa/multas?plate=... is a
-                # real, reachable endpoint (auth accepted, clean structured 404
-                # for an unregistered plate) but no test plate returned an
-                # actual 200, so the success shape below is sourced from public
-                # docs only, not a real observed response. It's also a *fines*
-                # endpoint, not a general vehicle-info one — no owner field, and
-                # brand/model come bundled in one "model" string rather than
-                # separate fields. VerifikClient._call refuses this country
-                # until a real 200 is actually observed.
-                primary_endpoint="vehiculo/placa/multas",
-                field_map={
-                    "plate": "plate",
-                    "model": "model",
-                    "year": "year",
-                    "status": "status",
-                },
-            ),
-        ),
-        (
-            "BO",
-            CountryConfig(
-                code="BO",
-                name="Bolivia",
-                # UNCONFIRMED: Verifik documents GET /v2/bo/vehicle?plate=...
-                # (Bolivia - Vehicle Information) and v2/bo/vehicle-soat. No
-                # real live response has been observed here, so this field_map
-                # is a best-effort guess consistent with the other South
-                # American "vehicle" endpoints (plate/brand/model/year/color).
-                # VerifikClient._call refuses this country until a real 200.
-                primary_endpoint="vehicle",
-                field_map={
-                    "plate": "plate",
-                    "brand": "brand",
-                    "model": "model",
-                    "year": "year",
-                    "color": "color",
-                },
-                extra_endpoints=("vehicle-soat",),
-            ),
-        ),
-        (
-            "CR",
-            CountryConfig(
-                code="CR",
-                name="Costa Rica",
-                # UNCONFIRMED: Verifik documents GET /v2/cr/vehicle?plate=...
-                # (Costa Rica - Vehicle Information). No real live response
-                # observed here; best-effort field_map from the generic
-                # endpoint skeleton. VerifikClient._call refuses until a real
-                # 200 is observed.
-                primary_endpoint="vehicle",
-                field_map={
-                    "plate": "plate",
-                    "brand": "brand",
-                    "model": "model",
-                    "year": "year",
-                    "color": "color",
-                },
-            ),
-        ),
-        (
-            "PY",
-            CountryConfig(
-                code="PY",
-                name="Paraguay",
-                # UNCONFIRMED: Verifik documents GET /v2/py/vehicle?plate=...
-                # (Paraguay - Vehicle Information). No real live response
-                # observed here; best-effort field_map. VerifikClient._call
-                # refuses until a real 200 is observed.
-                primary_endpoint="vehicle",
-                field_map={
-                    "plate": "plate",
-                    "brand": "brand",
-                    "model": "model",
-                    "year": "year",
-                },
-            ),
-        ),
-        (
-            "US",
-            CountryConfig(
-                code="US",
-                name="United States",
-                # UNCONFIRMED: Verifik documents GET /v2/usa/vehicle?plate=...
-                # and v2/usa/vehicle-by-vin. US registries return VIN (a field
-                # this codebase already surfaces), plus make/model/year. No real
-                # live response observed here — best-effort field_map.
-                # VerifikClient._call refuses until a real 200 is observed.
-                primary_endpoint="vehicle",
-                field_map={
-                    "plate": "plate",
-                    "make": "brand",
-                    "model": "model",
-                    "year": "year",
-                    "vin": "vin",
-                    "color": "color",
-                },
-            ),
-        ),
-    ]
+    "PE": CountryConfig(
+        code="PE",
+        name="Peru",
+        # Confirmed against Verifik's own docs (docs.verifik.co/vehicle-validation/
+        # peru/peruvian-vehicle): GET /v2/pe/vehiculo/placa?plate=... returns
+        # English field names, nested under "data" — no owner/color/status field
+        # at all (that would need a separate, unconfirmed SUNARP/"Full ID"
+        # product). `chasisSerial` is the closest thing to a VIN this endpoint has.
+        primary_endpoint="vehiculo/placa",
+        field_map={
+            "plate": "plate",
+            "brand": "brand",
+            "model": "model",
+            "year": "year",
+            "chasisserial": "vin",
+        },
+    ),
+    "MX": CountryConfig(
+        code="MX",
+        name="Mexico",
+        # UNCONFIRMED: GET /v2/mx/vehiculo/placa consistently returned
+        # "500 InternalServerError: 501" for three different test plates —
+        # either the path is wrong or this product isn't on this account's
+        # plan. field_map below is the best publicly-documented guess,
+        # not verified against a real response; VerifikClient._call
+        # refuses this country until a real 200 is actually observed.
+        primary_endpoint="vehiculo/placa",
+        field_map={
+            "plate": "plate",
+            "make": "brand",
+            "model": "model",
+            "year": "year",
+            "vin": "vin",
+            "owner": "owner",
+            "status": "status",
+        },
+    ),
+    "CO": CountryConfig(
+        code="CO",
+        name="Colombia",
+        # Confirmed with a real, authenticated live call (not docs): GET
+        # /v2/co/runt/vehicle-by-plate-simplified?plate=&documentType=&
+        # documentNumber= -> {"data": {"plate": ..., "vehicle": {"marca",
+        # "linea", "modelo" (this is the YEAR, not a model — RUNT quirk),
+        # "color", "estadoDelVehiculo", "noVin", ...}}}. No owner field —
+        # RUNT ties ownership to the document number you queried with,
+        # doesn't hand back a name.
+        primary_endpoint="runt/vehicle-by-plate-simplified",
+        field_map={
+            "plate": "plate",
+            "marca": "brand",
+            "linea": "model",
+            "modelo": "year",
+            "novin": "vin",
+            "color": "color",
+            "estadodelvehiculo": "status",
+        },
+        extra_inputs=("document_type", "document_number"),
+    ),
+    "CL": CountryConfig(
+        code="CL",
+        name="Chile",
+        # Confirmed with a real, authenticated live call: GET /v2/cl/
+        # vehicle?plate=... -> {"data": {"plate","mark" (not "brand"!),
+        # "model","year","chasisNumber","color","owner","rut","fines",
+        # "type",...}}. The only country confirmed to actually return an
+        # owner name (a real live test returned a genuine company name).
+        primary_endpoint="vehicle",
+        field_map={
+            "plate": "plate",
+            "mark": "brand",
+            "model": "model",
+            "year": "year",
+            "chasisnumber": "vin",
+            "owner": "owner",
+            "color": "color",
+        },
+    ),
+    "AR": CountryConfig(
+        code="AR",
+        name="Argentina",
+        # Confirmed with a real, authenticated live call (twice, two
+        # plates): GET /v2/ar/vehicle?plate=... -> {"data": {"plate",
+        # "brand","model","year","type","version",...}}. No owner, no
+        # color, no VIN/chassis field on this endpoint at all.
+        primary_endpoint="vehicle",
+        field_map={
+            "plate": "plate",
+            "brand": "brand",
+            "model": "model",
+            "year": "year",
+        },
+    ),
+    "BR": CountryConfig(
+        code="BR",
+        name="Brazil",
+        # Confirmed with a real, authenticated live call: GET /v2/br/
+        # vehicle?plate=... -> {"data": {"plate","brand","model",
+        # "modelYear" (the real year field — confirmed by the API's own
+        # error text on a bad plate: "..._does_not_have_modelYear"),
+        # "color",...}}. No owner field; "chassis" appears in Verifik's
+        # docs but was empty/absent on the one real success observed, so
+        # left unmapped rather than guessed.
+        primary_endpoint="vehicle",
+        field_map={
+            "plate": "plate",
+            "brand": "brand",
+            "model": "model",
+            "modelyear": "year",
+            "color": "color",
+        },
+    ),
+    "EC": CountryConfig(
+        code="EC",
+        name="Ecuador",
+        # UNCONFIRMED: GET /v2/ec/vehiculo/placa/multas?plate=... is a
+        # real, reachable endpoint (auth accepted, clean structured 404
+        # for an unregistered plate) but no test plate returned an
+        # actual 200, so the success shape below is sourced from public
+        # docs only, not a real observed response. It's also a *fines*
+        # endpoint, not a general vehicle-info one — no owner field, and
+        # brand/model come bundled in one "model" string rather than
+        # separate fields. VerifikClient._call refuses this country
+        # until a real 200 is actually observed.
+        primary_endpoint="vehiculo/placa/multas",
+        field_map={
+            "plate": "plate",
+            "model": "model",
+            "year": "year",
+            "status": "status",
+        },
+    ),
+    "BO": CountryConfig(
+        code="BO",
+        name="Bolivia",
+        # UNCONFIRMED: Verifik documents GET /v2/bo/vehicle?plate=...
+        # (Bolivia - Vehicle Information) and v2/bo/vehicle-soat. No
+        # real live response has been observed here, so this field_map
+        # is a best-effort guess consistent with the other South
+        # American "vehicle" endpoints (plate/brand/model/year/color).
+        # VerifikClient._call refuses this country until a real 200.
+        primary_endpoint="vehicle",
+        field_map={
+            "plate": "plate",
+            "brand": "brand",
+            "model": "model",
+            "year": "year",
+            "color": "color",
+        },
+    ),
+    "CR": CountryConfig(
+        code="CR",
+        name="Costa Rica",
+        # UNCONFIRMED: Verifik documents GET /v2/cr/vehicle?plate=...
+        # (Costa Rica - Vehicle Information). No real live response
+        # observed here; best-effort field_map from the generic
+        # endpoint skeleton. VerifikClient._call refuses until a real
+        # 200 is observed.
+        primary_endpoint="vehicle",
+        field_map={
+            "plate": "plate",
+            "brand": "brand",
+            "model": "model",
+            "year": "year",
+            "color": "color",
+        },
+    ),
+    "PY": CountryConfig(
+        code="PY",
+        name="Paraguay",
+        # UNCONFIRMED: Verifik documents GET /v2/py/vehicle?plate=...
+        # (Paraguay - Vehicle Information). No real live response
+        # observed here; best-effort field_map. VerifikClient._call
+        # refuses until a real 200 is observed.
+        primary_endpoint="vehicle",
+        field_map={
+            "plate": "plate",
+            "brand": "brand",
+            "model": "model",
+            "year": "year",
+        },
+    ),
+    "US": CountryConfig(
+        code="US",
+        name="United States",
+        # UNCONFIRMED: Verifik documents GET /v2/usa/vehicle?plate=...
+        # and v2/usa/vehicle-by-vin. US registries return VIN (a field
+        # this codebase already surfaces), plus make/model/year. No real
+        # live response observed here — best-effort field_map.
+        # VerifikClient._call refuses until a real 200 is observed.
+        primary_endpoint="vehicle",
+        field_map={
+            "plate": "plate",
+            "make": "brand",
+            "model": "model",
+            "year": "year",
+            "vin": "vin",
+            "color": "color",
+        },
+    ),
 }
 
 
@@ -333,14 +293,14 @@ def _clean_str(value: Any) -> str:
     """Cell/leaf value to a stripped string; None/NaN become '' not 'nan'."""
     if value is None:
         return ""
-    if isinstance(value, float) and value != value:  # NaN
+    if isinstance(value, float) and math.isnan(value):
         return ""
     return str(value).strip()
 
 
-def _leaf_key(key: str) -> str:
-    """Lowercase and strip non-alphanumerics from a JSON key for matching."""
-    return "".join(ch for ch in key.strip().lower() if ch.isalnum())
+def _norm(value: str) -> str:
+    """Lowercase and strip non-alphanumerics from a string for matching."""
+    return "".join(ch for ch in value.strip().lower() if ch.isalnum())
 
 
 def clean_plate(plate: str) -> str:
@@ -357,19 +317,18 @@ def clean_plate(plate: str) -> str:
 def flatten_json(node: Any) -> dict[str, str]:
     """Recursively flatten nested JSON into a leaf-field map.
 
-    Keys are normalized leaf names (`_leaf_key`), values become strings, and
+    Keys are normalized leaf names (`_norm`), values become strings, and
     a duplicate field resolves to the *shallowest* (outermost) occurrence —
     ties broken by first-seen. This is the "first-occurrence-wins" rule that
     holds per country even when a response nests the same field at several
     depths (e.g. an outer `marca` plus one inside a wrapper object).
     """
-    out: dict[str, tuple[int, int, str]] = {}
-    _counter = {"n": 0}
+    out: dict[str, tuple[int, str]] = {}
 
     def walk(node: Any, depth: int) -> None:
         if isinstance(node, dict):
             for key, value in node.items():
-                key = _leaf_key(key)
+                key = _norm(key)
                 if isinstance(value, (dict, list)):
                     walk(value, depth + 1)
                 else:
@@ -377,15 +336,14 @@ def flatten_json(node: Any) -> dict[str, str]:
                     if not text:
                         continue
                     if key not in out or out[key][0] > depth:
-                        out[key] = (depth, _counter["n"], text)
-                        _counter["n"] += 1
+                        out[key] = (depth, text)
         elif isinstance(node, list):
             for item in node:
                 walk(item, depth)
 
     walk(node, 0)
 
-    return {key: data[2] for key, data in sorted(out.items(), key=lambda kv: (kv[1][0], kv[1][1]))}
+    return {key: text for key, (_depth, text) in out.items()}
 
 
 def apply_field_map(flat: dict[str, str], cfg: CountryConfig) -> dict[str, str]:
@@ -692,8 +650,9 @@ def make_client(config: Config | None = None) -> VehicleClient:
     re-scanning config.yaml from the CWD.
     """
     registry = config.vehicle_registry if config else None
-    if VerifikClient(registry)._token:
-        return VerifikClient(registry)
+    client = VerifikClient(registry)
+    if client._token:
+        return client
     return MockVehicleClient()
 
 
@@ -706,44 +665,6 @@ MATCH = "Match"
 PARTIAL = "Partial Match"
 MISMATCH = "Mismatch"
 NO_DATA = "No data"
-
-
-def _norm(value: str) -> str:
-    return "".join(ch for ch in value.strip().lower() if ch.isalnum())
-
-
-def _matches(left: str, right: str) -> bool:
-    """True if neither side is empty and one contains the other (either dir)."""
-    if not left or not right:
-        return False
-    return left in right or right in left
-
-
-def classify_match(expected_brand: str, expected_model: str, brand: str, model: str) -> str:
-    """Bucket an API result against an expected vehicle description.
-
-    Returns one of `MATCH` / `PARTIAL` / `MISMATCH` / `NO_DATA`.
-    """
-    if not (brand and model):
-        return NO_DATA
-    eb, em = _norm(expected_brand), _norm(expected_model)
-    b, m = _norm(brand), _norm(model)
-    if eb and em and _matches(eb, b) and _matches(em, m):
-        return MATCH
-    if (eb and _matches(eb, b)) or (em and _matches(em, m)):
-        return PARTIAL
-    if eb or em:
-        return MISMATCH
-    return NO_DATA
-
-
-def cross_check(
-    expected_brand: str,
-    expected_model: str,
-    result: dict[str, str],
-) -> str:
-    """Classify one API result against the expected vehicle; NO_DATA otherwise."""
-    return classify_match(expected_brand, expected_model, result.get("brand", ""), result.get("model", ""))
 
 
 def classify_expected(expected: str, brand: str, model: str) -> str:
@@ -771,11 +692,6 @@ def classify_expected(expected: str, brand: str, model: str) -> str:
     return MISMATCH
 
 
-def bucket_status(result: dict[str, str]) -> str:
-    """Found / Not found / Error label for a canonical record."""
-    return result.get("status", "").strip() or ("Found" if result.get("brand") or result.get("owner") else "No data")
-
-
 def verified_download_df(
     rows: list[dict[str, Any]],
     expected_col: str | None = None,
@@ -783,8 +699,9 @@ def verified_download_df(
     """Rows re-keyed for the Excel/verification sheet, in display column order.
 
     The first column is always the plate; remaining canonical fields follow,
-    then the verification verdict + timestamp. `expected_col`, when set, is the
-    user's chosen 'expected vehicle' source column carried through on each row.
+    then the verification verdict + timestamp. `expected_col` is truthy when
+    the caller wants an 'Expected vehicle' column included, sourced from each
+    row's own `expected_vehicle` value (not the column name itself).
     """
     out = []
     for row in rows:
@@ -799,7 +716,7 @@ def verified_download_df(
                 "Color": row.get("color", ""),
                 "Status": row.get("status", ""),
                 "Verdict": row.get("verdict", ""),
-                "Expected vehicle": expected_col if expected_col else "",
+                "Expected vehicle": row.get("expected_vehicle", "") if expected_col else "",
                 "Verified Date": row.get("verified_date", ""),
             }
         )
