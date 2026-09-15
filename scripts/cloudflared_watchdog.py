@@ -43,7 +43,16 @@ sys.path.insert(0, str(BASE_DIR))
 from phase0_foundations.drive_store import DriveStoreError, push_tunnel_url  # noqa: E402
 
 _URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+_FAILURE_RE = re.compile(r"Retrying connection|failed to serve tunnel connection")
 _RESTART_BACKOFF_SECONDS = 10
+# cloudflared can get stuck retrying a broken QUIC session forever without
+# ever exiting (observed live: "control stream encountered a failure" /
+# "Retrying connection in up to 1m4s", looping indefinitely) -- the tunnel is
+# dead but the process never does, so "restart when the process exits" alone
+# never fires. Force-kill and restart after this many consecutive failure
+# lines with no fresh URL in between, so a new (working) quick tunnel gets
+# minted instead of silently leaving a dead one published.
+_MAX_CONSECUTIVE_FAILURES = 4
 
 
 def _publish(url: str) -> bool:
@@ -68,6 +77,7 @@ def _run_one_tunnel(cloudflared: str, target: str) -> None:
         bufsize=1,
     )
     published_url: str | None = None
+    consecutive_failures = 0
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -75,7 +85,16 @@ def _run_one_tunnel(cloudflared: str, target: str) -> None:
             match = _URL_RE.search(line)
             if match and match.group(0) != published_url:
                 published_url = match.group(0)
+                consecutive_failures = 0
                 _publish(published_url)
+                continue
+            if _FAILURE_RE.search(line):
+                consecutive_failures += 1
+                if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    print(f"[watchdog] {consecutive_failures} consecutive reconnect "
+                          "failures with no working tunnel -- forcing a restart "
+                          "instead of waiting for cloudflared to exit on its own", flush=True)
+                    return
     finally:
         if proc.poll() is None:
             proc.terminate()
